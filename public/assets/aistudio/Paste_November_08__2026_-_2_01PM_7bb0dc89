@@ -1,0 +1,2815 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import {
+  Search,
+  Key,
+  Terminal,
+  Bookmark,
+  Download,
+  Sliders,
+  Sparkles,
+  ShieldAlert,
+  TrendingUp,
+  DollarSign,
+  CheckCircle2,
+  AlertTriangle,
+  XCircle,
+  Activity,
+  Globe,
+  Cpu,
+  Layers,
+  Copy,
+  Check,
+  RefreshCw,
+  ChevronRight,
+  ChevronDown,
+  ChevronUp,
+  ExternalLink,
+  Trash2,
+  Eye,
+  BarChart3,
+  Table as TableIcon,
+  LayoutGrid,
+  Zap,
+  Target,
+  Package,
+  Radio,
+  Info,
+  X,
+  ArrowUpDown,
+  Megaphone,
+  Scale,
+  Calculator,
+  FileJson,
+  FileSpreadsheet,
+  Play,
+  Link2
+} from 'lucide-react';
+
+// ============================================================================
+// CONSTANTS & PRESETS
+// ============================================================================
+const NICHE_PRESETS = [
+  'Smart Kitchen Gadgets',
+  'Pet Grooming & Tech',
+  'Ergonomic Home Office',
+  'Auto Detailing & Accessories',
+  'Winter Apparel & Heating',
+  'Compact Home Organization',
+  'Portable Fitness Recovery',
+  'Baby Safety & Travel Gear'
+];
+
+const TARGET_MARKETS = [
+  { id: 'USA', label: 'USA (North America)', currency: '$' },
+  { id: 'Global', label: 'Global (Worldwide)', currency: '$' },
+  { id: 'UK', label: 'United Kingdom', currency: '$' },
+  { id: 'Europe', label: 'European Union', currency: '$' },
+  { id: 'UAE', label: 'UAE / GCC Middle East', currency: '$' },
+  { id: 'Pakistan', label: 'Pakistan (Local COD / E-Com)', currency: '$' }
+];
+
+const BUDGET_TIERS = [
+  { id: 'Low Ticket (<$20)', label: 'Low Ticket (<$20)', range: 'Under $20 retail' },
+  { id: 'Mid Ticket ($20-$60)', label: 'Mid Ticket ($20-$60)', range: '$20 to $60 retail' },
+  { id: 'High Ticket ($60+)', label: 'High Ticket ($60+)', range: '$60 to $250+ retail' }
+];
+
+const OPENROUTER_MODELS = [
+  { id: 'meta-llama/llama-3.3-70b-instruct', label: 'Llama 3.3 70B Instruct (Recommended)' },
+  { id: 'anthropic/claude-3.5-sonnet', label: 'Claude 3.5 Sonnet (High Precision)' },
+  { id: 'google/gemini-2.0-flash-001', label: 'Gemini 2.0 Flash (Fast & Economical)' },
+  { id: 'meta-llama/llama-3.1-8b-instruct', label: 'Llama 3.1 8B Instruct (Ultra-Light Fallback)' },
+  { id: 'openai/gpt-4o-mini', label: 'GPT-4o Mini (Balanced)' }
+];
+
+// ============================================================================
+// ROBUST JSON EXTRACTION & REPAIR HELPER
+// ============================================================================
+function extractAndParseJSON(rawText) {
+  if (!rawText || typeof rawText !== 'string') {
+    throw new Error('Empty or non-string response from AI engine.');
+  }
+
+  // Strip markdown code blocks if present
+  let cleaned = rawText
+    .replace(/```json\s*/gi, '')
+    .replace(/```\s*/g, '')
+    .trim();
+
+  // Attempt direct parse first
+  try {
+    return JSON.parse(cleaned);
+  } catch (e) {
+    // Locate first { or [ and last } or ]
+    const firstBrace = cleaned.indexOf('{');
+    const firstBracket = cleaned.indexOf('[');
+    let startIdx = -1;
+    let endIdx = -1;
+
+    if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
+      startIdx = firstBrace;
+      endIdx = cleaned.lastIndexOf('}');
+    } else if (firstBracket !== -1) {
+      startIdx = firstBracket;
+      endIdx = cleaned.lastIndexOf(']');
+    }
+
+    if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+      let substring = cleaned.slice(startIdx, endIdx + 1);
+      // Repair common LLM JSON quirks: trailing commas before } or ]
+      substring = substring.replace(/,\s*([}\]])/g, '$1');
+      try {
+        return JSON.parse(substring);
+      } catch (innerErr) {
+        // Further cleanup of control characters inside strings
+        const sanitized = substring.replace(/[\u0000-\u0019]+/g, ' ');
+        return JSON.parse(sanitized);
+      }
+    }
+    throw new Error('Failed to parse structured JSON from AI output.');
+  }
+}
+
+// ============================================================================
+// REAL API CALL ADAPTERS (GEMINI, GROQ, OPENROUTER)
+// ============================================================================
+async function callGeminiAPI(apiKey, systemInstruction, userPrompt) {
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
+  const startTime = performance.now();
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: {
+        parts: [{ text: systemInstruction }]
+      },
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: userPrompt }]
+        }
+      ],
+      generationConfig: {
+        temperature: 0.35,
+        responseMimeType: 'application/json'
+      }
+    })
+  });
+
+  const latency = Math.round(performance.now() - startTime);
+
+  if (!response.ok) {
+    let errText = `HTTP ${response.status}`;
+    try {
+      const errJson = await response.json();
+      errText = errJson?.error?.message || errText;
+    } catch (_) {}
+    throw new Error(`Gemini API Error: ${errText}`);
+  }
+
+  const data = await response.json();
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  return { text, latency, provider: 'Google Gemini (gemini-2.5-flash)' };
+}
+
+async function callGroqAPI(apiKey, systemInstruction, userPrompt) {
+  const endpoint = 'https://api.groq.com/openai/v1/chat/completions';
+  const startTime = performance.now();
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey.trim()}`
+    },
+    body: JSON.stringify({
+      model: 'llama-3.3-70b-versatile',
+      temperature: 0.3,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: systemInstruction + '\nRespond strictly with valid JSON.' },
+        { role: 'user', content: userPrompt }
+      ]
+    })
+  });
+
+  const latency = Math.round(performance.now() - startTime);
+
+  if (!response.ok) {
+    let errText = `HTTP ${response.status}`;
+    try {
+      const errJson = await response.json();
+      errText = errJson?.error?.message || errText;
+    } catch (_) {}
+    throw new Error(`Groq API Error: ${errText}`);
+  }
+
+  const data = await response.json();
+  const text = data?.choices?.[0]?.message?.content || '';
+  return { text, latency, provider: 'Groq LPU (llama-3.3-70b-versatile)' };
+}
+
+async function callOpenRouterAPI(apiKey, model, systemInstruction, userPrompt) {
+  const endpoint = 'https://openrouter.ai/api/v1/chat/completions';
+  const startTime = performance.now();
+  const chosenModel = model || 'meta-llama/llama-3.3-70b-instruct';
+
+  const makeRequest = async (targetModel) => {
+    return fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey.trim()}`,
+        'HTTP-Referer': window.location.origin || 'https://winning-product-hunter.app',
+        'X-Title': 'Triple-AI Winning Product Hunter'
+      },
+      body: JSON.stringify({
+        model: targetModel,
+        temperature: 0.35,
+        messages: [
+          {
+            role: 'system',
+            content: systemInstruction + '\nIMPORTANT: Return ONLY raw valid JSON without markdown codeblocks.'
+          },
+          { role: 'user', content: userPrompt }
+        ]
+      })
+    });
+  };
+
+  let response = await makeRequest(chosenModel);
+  let usedModel = chosenModel;
+
+  // Automatic fallback if selected OpenRouter model is unavailable or requires extra credits
+  if (!response.ok && chosenModel !== 'meta-llama/llama-3.1-8b-instruct') {
+    usedModel = 'meta-llama/llama-3.1-8b-instruct';
+    response = await makeRequest(usedModel);
+  }
+
+  const latency = Math.round(performance.now() - startTime);
+
+  if (!response.ok) {
+    let errText = `HTTP ${response.status}`;
+    try {
+      const errJson = await response.json();
+      errText = errJson?.error?.message || errText;
+    } catch (_) {}
+    throw new Error(`OpenRouter API Error: ${errText}`);
+  }
+
+  const data = await response.json();
+  const text = data?.choices?.[0]?.message?.content || '';
+  return { text, latency, provider: `OpenRouter (${usedModel})` };
+}
+
+// ============================================================================
+// MAIN APPLICATION COMPONENT
+// ============================================================================
+export default function App() {
+  // --------------------------------------------------------------------------
+  // 1. API KEYS & CONFIGURATION STATE (Persisted in localStorage)
+  // --------------------------------------------------------------------------
+  const [apiKeys, setApiKeys] = useState(() => {
+    try {
+      const saved = localStorage.getItem('wph_triple_api_keys_v1');
+      if (saved) return JSON.parse(saved);
+    } catch (_) {}
+    return {
+      gemini: '',
+      groq: '',
+      openrouter: '',
+      openrouterModel: 'meta-llama/llama-3.3-70b-instruct'
+    };
+  });
+
+  const [keyStatus, setKeyStatus] = useState({
+    gemini: { status: 'untested', latency: null, message: '' },
+    groq: { status: 'untested', latency: null, message: '' },
+    openrouter: { status: 'untested', latency: null, message: '' }
+  });
+
+  const [isConfigOpen, setIsConfigOpen] = useState(false);
+  const [isTestingKeys, setIsTestingKeys] = useState(false);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('wph_triple_api_keys_v1', JSON.stringify(apiKeys));
+    } catch (_) {}
+  }, [apiKeys]);
+
+  // Determine which engines have non-empty keys configured
+  const activeEngines = useMemo(() => {
+    const list = [];
+    if (apiKeys.gemini?.trim()) list.push('gemini');
+    if (apiKeys.groq?.trim()) list.push('groq');
+    if (apiKeys.openrouter?.trim()) list.push('openrouter');
+    return list;
+  }, [apiKeys]);
+
+  // --------------------------------------------------------------------------
+  // 2. PRODUCT HUNTING INPUTS & WORKFLOW STATE
+  // --------------------------------------------------------------------------
+  const [niche, setNiche] = useState('Smart Kitchen Gadgets');
+  const [targetMarket, setTargetMarket] = useState('USA');
+  const [budgetTier, setBudgetTier] = useState('Mid Ticket ($20-$60)');
+  const [huntMode, setHuntMode] = useState('live_scraper'); // 'live_scraper' | 'ai_deep_synthesis'
+  const [customSignals, setCustomSignals] = useState('');
+  const [showCustomSignalsInput, setShowCustomSignalsInput] = useState(false);
+
+  // Execution & Results State
+  const [isHunting, setIsHunting] = useState(false);
+  const [terminalLogs, setTerminalLogs] = useState([]);
+  const [isTerminalOpen, setIsTerminalOpen] = useState(true);
+  const [scrapedSignals, setScrapedSignals] = useState([]);
+  const [products, setProducts] = useState(() => {
+    try {
+      const cached = localStorage.getItem('wph_last_hunt_products_v1');
+      return cached ? JSON.parse(cached) : [];
+    } catch (_) {
+      return [];
+    }
+  });
+
+  const [savedWinners, setSavedWinners] = useState(() => {
+    try {
+      const saved = localStorage.getItem('wph_saved_winners_v1');
+      return saved ? JSON.parse(saved) : [];
+    } catch (_) {
+      return [];
+    }
+  });
+
+  // UI Navigation, Sorting, Filtering & Deep-Dive Drawer
+  const [activeView, setActiveView] = useState('grid'); // 'grid' | 'matrix' | 'saved'
+  const [sortBy, setSortBy] = useState('winningScore'); // 'winningScore' | 'profitMargin' | 'demandScore' | 'viralFactor'
+  const [verdictFilter, setVerdictFilter] = useState('ALL'); // 'ALL' | 'MUST LAUNCH' | 'TEST WITH CAUTION' | 'SATURATED - AVOID'
+  const [selectedProduct, setSelectedProduct] = useState(null);
+  const [drawerTab, setDrawerTab] = useState('calculator'); // 'calculator' | 'marketing' | 'debate'
+  const [toasts, setToasts] = useState([]);
+  const [copiedId, setCopiedId] = useState(null);
+
+  const terminalEndRef = useRef(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('wph_last_hunt_products_v1', JSON.stringify(products));
+    } catch (_) {}
+  }, [products]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('wph_saved_winners_v1', JSON.stringify(savedWinners));
+    } catch (_) {}
+  }, [savedWinners]);
+
+  // --------------------------------------------------------------------------
+  // 3. TOAST & LOGGING UTILITIES
+  // --------------------------------------------------------------------------
+  const addToast = (title, message, type = 'error') => {
+    const id = Date.now() + Math.random();
+    setToasts((prev) => [...prev, { id, title, message, type }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 6500);
+  };
+
+  const removeToast = (id) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  };
+
+  const appendLog = (engine, message, status = 'info', latency = null) => {
+    const timestamp = new Date().toLocaleTimeString([], {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+    setTerminalLogs((prev) => [
+      ...prev,
+      { id: Date.now() + Math.random(), timestamp, engine, message, status, latency }
+    ]);
+  };
+
+  const copyToClipboard = (text, id) => {
+    navigator.clipboard.writeText(text);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 1800);
+  };
+
+  // --------------------------------------------------------------------------
+  // 4. REAL API CONNECTION PING TESTER
+  // --------------------------------------------------------------------------
+  const testActiveConnections = async () => {
+    if (activeEngines.length === 0) {
+      addToast(
+        'No API Keys Entered',
+        'Please enter at least one valid API key (Gemini, Groq, or OpenRouter) to test connections.',
+        'warning'
+      );
+      return;
+    }
+
+    setIsTestingKeys(true);
+    const pingSystem = 'You are an API health check responder. Return strictly JSON: {"ok": true}';
+    const pingUser = 'Ping status check. Return {"ok": true}';
+
+    const nextStatus = { ...keyStatus };
+
+    const tasks = [];
+
+    if (apiKeys.gemini?.trim()) {
+      nextStatus.gemini = { status: 'testing', latency: null, message: 'Pinging endpoint...' };
+      tasks.push(
+        callGeminiAPI(apiKeys.gemini, pingSystem, pingUser)
+          .then((res) => {
+            nextStatus.gemini = {
+              status: 'connected',
+              latency: res.latency,
+              message: `Verified (${res.latency}ms)`
+            };
+          })
+          .catch((err) => {
+            nextStatus.gemini = {
+              status: 'error',
+              latency: null,
+              message: err.message
+            };
+            addToast('Gemini Key Validation Failed', err.message, 'error');
+          })
+      );
+    } else {
+      nextStatus.gemini = { status: 'missing', latency: null, message: 'No key provided' };
+    }
+
+    if (apiKeys.groq?.trim()) {
+      nextStatus.groq = { status: 'testing', latency: null, message: 'Pinging endpoint...' };
+      tasks.push(
+        callGroqAPI(apiKeys.groq, pingSystem, pingUser)
+          .then((res) => {
+            nextStatus.groq = {
+              status: 'connected',
+              latency: res.latency,
+              message: `Verified (${res.latency}ms)`
+            };
+          })
+          .catch((err) => {
+            nextStatus.groq = {
+              status: 'error',
+              latency: null,
+              message: err.message
+            };
+            addToast('Groq Key Validation Failed', err.message, 'error');
+          })
+      );
+    } else {
+      nextStatus.groq = { status: 'missing', latency: null, message: 'No key provided' };
+    }
+
+    if (apiKeys.openrouter?.trim()) {
+      nextStatus.openrouter = { status: 'testing', latency: null, message: 'Pinging endpoint...' };
+      tasks.push(
+        callOpenRouterAPI(apiKeys.openrouter, apiKeys.openrouterModel, pingSystem, pingUser)
+          .then((res) => {
+            nextStatus.openrouter = {
+              status: 'connected',
+              latency: res.latency,
+              message: `Verified (${res.latency}ms)`
+            };
+          })
+          .catch((err) => {
+            nextStatus.openrouter = {
+              status: 'error',
+              latency: null,
+              message: err.message
+            };
+            addToast('OpenRouter Key Validation Failed', err.message, 'error');
+          })
+      );
+    } else {
+      nextStatus.openrouter = { status: 'missing', latency: null, message: 'No key provided' };
+    }
+
+    setKeyStatus({ ...nextStatus });
+    await Promise.allSettled(tasks);
+    setKeyStatus({ ...nextStatus });
+    setIsTestingKeys(false);
+
+    const connectedCount = Object.values(nextStatus).filter((s) => s.status === 'connected').length;
+    if (connectedCount > 0) {
+      addToast(
+        'Connection Test Complete',
+        `${connectedCount} of ${activeEngines.length} configured AI engine(s) responded with valid JSON.`,
+        'success'
+      );
+    }
+  };
+
+  // --------------------------------------------------------------------------
+  // 5. LIVE WEB SIGNAL SCRAPER (REDDIT + HACKERNEWS + USER SIGNALS)
+  // --------------------------------------------------------------------------
+  const fetchLiveWebSignals = async (searchNiche) => {
+    const collectedSignals = [];
+
+    // 1. Parse any user-supplied URLs or product titles
+    if (customSignals.trim()) {
+      const customLines = customSignals
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      customLines.forEach((line) => {
+        collectedSignals.push({
+          source: 'USER_SIGNAL',
+          title: line,
+          engagement: 'Direct Input'
+        });
+      });
+      appendLog('SCRAPER', `Injected ${customLines.length} custom user product/URL signals.`, 'success');
+    }
+
+    if (huntMode !== 'live_scraper') {
+      appendLog('SCRAPER', 'Live Web Scraper bypassed (AI Deep Synthesis mode selected).', 'info');
+      return collectedSignals;
+    }
+
+    appendLog('SCRAPER', `Querying live public Reddit & HackerNews JSON feeds for "${searchNiche}"...`, 'info');
+
+    // 2. Fetch Reddit Public JSON API
+    const redditUrl = `https://www.reddit.com/search.json?q=${encodeURIComponent(
+      searchNiche + ' gadget OR product OR buy OR best'
+    )}&sort=relevance&t=year&limit=8`;
+
+    // 3. Fetch HackerNews Algolia Public Search API (CORS-friendly & fast)
+    const hnUrl = `https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(
+      searchNiche
+    )}&tags=story&hitsPerPage=6`;
+
+    const [redditRes, hnRes] = await Promise.allSettled([
+      fetch(redditUrl, { headers: { Accept: 'application/json' } }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      }),
+      fetch(hnUrl, { headers: { Accept: 'application/json' } }).then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+    ]);
+
+    if (redditRes.status === 'fulfilled' && redditRes.value?.data?.children) {
+      const posts = redditRes.value.data.children;
+      posts.forEach((p) => {
+        if (p?.data?.title) {
+          collectedSignals.push({
+            source: `r/${p.data.subreddit || 'reddit'}`,
+            title: p.data.title,
+            engagement: `${p.data.ups || 0} upvotes · ${p.data.num_comments || 0} comments`
+          });
+        }
+      });
+      appendLog('REDDIT_API', `Extracted ${posts.length} live consumer discussion signals from Reddit.`, 'success');
+    } else {
+      appendLog(
+        'REDDIT_API',
+        'Reddit public JSON blocked by browser tracking protection or rate-limit; falling back to HN + AI synthesis.',
+        'warn'
+      );
+    }
+
+    if (hnRes.status === 'fulfilled' && Array.isArray(hnRes.value?.hits)) {
+      const hits = hnRes.value.hits;
+      hits.forEach((h) => {
+        if (h?.title) {
+          collectedSignals.push({
+            source: 'HackerNews',
+            title: h.title,
+            engagement: `${h.points || 0} pts · ${h.num_comments || 0} comments`
+          });
+        }
+      });
+      appendLog('ALGOLIA_HN', `Extracted ${hits.length} tech & consumer trend signals from Algolia HN.`, 'success');
+    }
+
+    setScrapedSignals(collectedSignals);
+    return collectedSignals;
+  };
+
+  // --------------------------------------------------------------------------
+  // 6. DYNAMIC ENGINE DISPATCHER (RESILIENT MULTI-KEY REDISTRIBUTION)
+  // --------------------------------------------------------------------------
+  const executeEngineTask = async (preferredEngine, systemPrompt, userPrompt) => {
+    // Build priority order: preferredEngine first (if active), then other active engines
+    const priorityOrder = [
+      preferredEngine,
+      ...['gemini', 'groq', 'openrouter'].filter((e) => e !== preferredEngine)
+    ].filter((engineName) => activeEngines.includes(engineName));
+
+    if (priorityOrder.length === 0) {
+      throw new Error('No active API keys configured.');
+    }
+
+    let lastError = null;
+
+    for (const engine of priorityOrder) {
+      try {
+        if (engine !== preferredEngine) {
+          appendLog(
+            'ROUTER',
+            `Redistributing [${preferredEngine.toUpperCase()}] workload to active engine [${engine.toUpperCase()}]...`,
+            'warn'
+          );
+        }
+        if (engine === 'gemini') {
+          return await callGeminiAPI(apiKeys.gemini, systemPrompt, userPrompt);
+        }
+        if (engine === 'groq') {
+          return await callGroqAPI(apiKeys.groq, systemPrompt, userPrompt);
+        }
+        if (engine === 'openrouter') {
+          return await callOpenRouterAPI(
+            apiKeys.openrouter,
+            apiKeys.openrouterModel,
+            systemPrompt,
+            userPrompt
+          );
+        }
+      } catch (err) {
+        lastError = err;
+        appendLog(
+          engine.toUpperCase(),
+          `${err.message} — attempting failover to next available engine...`,
+          'error'
+        );
+      }
+    }
+
+    throw lastError || new Error('All configured AI engines failed to respond.');
+  };
+
+  // --------------------------------------------------------------------------
+  // 7. TRIPLE-AI PARALLEL HUNTING PIPELINE
+  // --------------------------------------------------------------------------
+  const handleHuntProducts = async (e) => {
+    if (e) e.preventDefault();
+
+    if (!niche.trim()) {
+      addToast('Missing Niche / Keyword', 'Please enter a product niche or select a preset chip.', 'warning');
+      return;
+    }
+
+    if (activeEngines.length === 0) {
+      setIsConfigOpen(true);
+      addToast(
+        'API Key Required',
+        'Configure at least 1 API key (Gemini, Groq, or OpenRouter) in the Triple-Engine Drawer to run live AI product hunting.',
+        'warning'
+      );
+      return;
+    }
+
+    setIsHunting(true);
+    setIsTerminalOpen(true);
+    setTerminalLogs([]);
+    setActiveView('grid');
+
+    appendLog(
+      'SYSTEM',
+      `Initializing Triple-AI Product Hunter for niche: "${niche}" | Market: ${targetMarket} | Tier: ${budgetTier}`,
+      'info'
+    );
+    appendLog(
+      'SYSTEM',
+      `Active Engines Detected: [${activeEngines.map((e) => e.toUpperCase()).join(', ')}] (${
+        activeEngines.length === 3
+          ? 'Full Triple-Engine Parallel Mode'
+          : 'Dynamic Task Redistribution Mode Enabled'
+      })`,
+      'info'
+    );
+
+    try {
+      // PHASE 0: LIVE SIGNAL SCRAPING
+      const signals = await fetchLiveWebSignals(niche);
+      const signalsContext =
+        signals.length > 0
+          ? `LIVE SCRAPED WEB & CONSUMER SIGNALS:\n` +
+            signals.map((s, idx) => `${idx + 1}. [${s.source}] ${s.title} (${s.engagement})`).join('\n')
+          : 'No external forum threads matched; synthesize from current search & e-commerce velocity trends.';
+
+      // PHASE 1: BASE PRODUCT DISCOVERY (6 SPECIFIC WINNING CANDIDATES)
+      appendLog(
+        'PHASE_1',
+        'Generating 6 high-potential physical e-commerce products with real market demand signals...',
+        'info'
+      );
+
+      const discoverySystemPrompt = `You are an elite E-Commerce Product Researcher & Trend Analyst.
+Generate exactly 6 specific, physical, shippable e-commerce/dropshipping/wholesale products for the user's niche, target market, and price tier.
+Avoid vague generic names (e.g. instead of "Kitchen Knife", specify "Magnetic Self-Sharpening Bamboo Knife Block with LED UV Sanitizer").
+Return strictly a JSON object matching this exact schema:
+{
+  "products": [
+    {
+      "id": "prod_1",
+      "name": "Specific Product Name",
+      "category": "Sub-Category Name",
+      "tagline": "One-sentence value proposition",
+      "problemSolved": "Specific painful consumer problem this solves immediately"
+    }
+  ]
+}`;
+
+      const discoveryUserPrompt = `Niche/Keyword: "${niche}"
+Target Market: ${targetMarket}
+Price Tier: ${budgetTier}
+${signalsContext}
+
+Identify 6 specific physical products with breakout potential right now. Output strictly valid JSON.`;
+
+      const discoveryRes = await executeEngineTask('gemini', discoverySystemPrompt, discoveryUserPrompt);
+      const discoveryParsed = extractAndParseJSON(discoveryRes.text);
+      const baseProducts = Array.isArray(discoveryParsed?.products)
+        ? discoveryParsed.products.slice(0, 6)
+        : [];
+
+      if (baseProducts.length === 0) {
+        throw new Error('Phase 1 Discovery returned an empty product list.');
+      }
+
+      appendLog(
+        'PHASE_1',
+        `Discovered ${baseProducts.length} candidate products via ${discoveryRes.provider} in ${discoveryRes.latency}ms.`,
+        'success',
+        discoveryRes.latency
+      );
+
+      const productRosterJSON = JSON.stringify(
+        baseProducts.map((p, i) => ({
+          id: p.id || `prod_${i + 1}`,
+          name: p.name,
+          category: p.category,
+          problemSolved: p.problemSolved
+        }))
+      );
+
+      // PHASE 2: PARALLEL TRIPLE-AI DEEP ANALYSIS (Promise.allSettled)
+      appendLog(
+        'PHASE_2',
+        'Launching parallel Triple-AI analysis: [Role 1: Market & Saturation] + [Role 2: Quant & Viral Hooks] + [Role 3: Ruthless Skeptic Council]...',
+        'info'
+      );
+
+      // ROLE A: GEMINI (Deep Market Trend, Search Intent, Demographics, Competitor Saturation)
+      const geminiRoleSystem = `You are Role A: Deep Market Trend & Search Intent Analyst.
+Analyze every product in the provided list for the ${targetMarket} market (${budgetTier}).
+Return strictly valid JSON with this exact root key "marketAnalysis" containing an array of objects:
+{
+  "marketAnalysis": [
+    {
+      "id": "prod_1",
+      "demandScore": 84,
+      "saturationScore": 42,
+      "searchIntent": "High transactional intent driven by...",
+      "targetDemographics": "Women & homeowners aged 24-45 who...",
+      "trendTrajectory": "Rising Q3/Q4 breakout velocity...",
+      "geminiInsight": "Detailed 2-sentence analytical thesis on market depth and search volume."
+    }
+  ]
+}`;
+
+      // ROLE B: GROQ (Ultra-Fast Winning Score, Unit Economics, COGS/Price, Viral Factor, 3 TikTok/Meta Hooks)
+      const groqRoleSystem = `You are Role B: Quantitative Unit Economics & Viral Growth Hacker.
+For every product in the provided list (${budgetTier} in ${targetMarket}), calculate realistic sourcing cost (Alibaba/1688 landed COGS in USD), recommended retail selling price (USD), estimated CPA (Customer Acquisition Cost in USD), shipping cost (USD), winning score (0-100), viral wow factor (1-10), 3 scroll-stopping TikTok/Meta video ad hooks, primary ad copy, visual creative angle, and 4 target interest stacks.
+Return strictly valid JSON with this exact root key "quantAnalysis":
+{
+  "quantAnalysis": [
+    {
+      "id": "prod_1",
+      "winningScore": 88,
+      "sourcingCost": 7.50,
+      "sellingPrice": 39.99,
+      "estimatedShipping": 4.50,
+      "estimatedCPA": 12.00,
+      "netProfitMargin": 39,
+      "viralFactor": 8.7,
+      "adHooks": [
+        "Hook 1: Stop doing [painful task] the hard way...",
+        "Hook 2: I tested the viral [product] so you don't have to...",
+        "Hook 3: Why 40,000 households in ${targetMarket} switched to this..."
+      ],
+      "primaryAdCopy": "Compelling direct-response Meta/TikTok ad body text...",
+      "creativeBlueprint": "First 3 seconds visual demonstration instruction...",
+      "targetInterests": ["Interest 1", "Interest 2", "Interest 3", "Interest 4"],
+      "groqInsight": "Quantitative breakdown of why the margin and viral thumb-stop rate work."
+    }
+  ]
+}`;
+
+      // ROLE C: OPENROUTER (Ruthless Skeptic & Sourcing Strategist)
+      const openRouterRoleSystem = `You are Role C: The Ruthless E-Commerce Skeptic & Sourcing Council.
+Your job is to challenge hype, expose hidden saturation traps, quality/return rate risks, seasonal pitfalls, and provide concrete Alibaba/supplier negotiation tactics (MOQ, custom packaging, private label angles).
+Assign each product a strict Final Verdict from ONLY these three exact strings:
+"MUST LAUNCH", "TEST WITH CAUTION", or "SATURATED - AVOID".
+Return strictly valid JSON with this exact root key "skepticAnalysis":
+{
+  "skepticAnalysis": [
+    {
+      "id": "prod_1",
+      "verdict": "MUST LAUNCH",
+      "saturationRisk": "Medium — generic versions exist on Amazon, requires custom bundle...",
+      "seasonalTrap": "Evergreen year-round demand with Q4 gifting spike.",
+      "returnRateRisk": "Low defect rate if food-grade silicone certification is verified.",
+      "supplierNegotiationAngle": "Request MOQ 100 custom color box + laser logo at $0.35/unit extra.",
+      "openRouterInsight": "Brutally honest devil's advocate verdict on whether a media buyer will profit or burn cash."
+    }
+  ]
+}`;
+
+      const sharedAnalysisUserPrompt = `Analyze these 6 candidate products for Niche: "${niche}", Target Market: "${targetMarket}", Budget Tier: "${budgetTier}".
+Candidate Products JSON:
+${productRosterJSON}
+
+${signalsContext}
+
+Return strictly valid JSON matching your assigned schema for all 6 product IDs.`;
+
+      const [geminiSettled, groqSettled, openRouterSettled] = await Promise.allSettled([
+        executeEngineTask('gemini', geminiRoleSystem, sharedAnalysisUserPrompt),
+        executeEngineTask('groq', groqRoleSystem, sharedAnalysisUserPrompt),
+        executeEngineTask('openrouter', openRouterRoleSystem, sharedAnalysisUserPrompt)
+      ]);
+
+      let marketMap = {};
+      let quantMap = {};
+      let skepticMap = {};
+
+      let marketProvider = 'Unassigned';
+      let quantProvider = 'Unassigned';
+      let skepticProvider = 'Unassigned';
+
+      if (geminiSettled.status === 'fulfilled') {
+        marketProvider = geminiSettled.value.provider;
+        appendLog(
+          'ENGINE_A (MARKET)',
+          `Market Trend & Saturation matrix completed via ${marketProvider} (${geminiSettled.value.latency}ms).`,
+          'success',
+          geminiSettled.value.latency
+        );
+        try {
+          const parsed = extractAndParseJSON(geminiSettled.value.text);
+          const arr = parsed?.marketAnalysis || parsed?.products || (Array.isArray(parsed) ? parsed : []);
+          arr.forEach((item, idx) => {
+            const key = item.id || `prod_${idx + 1}`;
+            marketMap[key] = item;
+          });
+        } catch (parseErr) {
+          appendLog('ENGINE_A (MARKET)', `JSON Parse Warning: ${parseErr.message}`, 'warn');
+        }
+      } else {
+        appendLog('ENGINE_A (MARKET)', `Failed: ${geminiSettled.reason?.message}`, 'error');
+        addToast('Market Analysis Engine Error', geminiSettled.reason?.message || 'Request failed', 'error');
+      }
+
+      if (groqSettled.status === 'fulfilled') {
+        quantProvider = groqSettled.value.provider;
+        appendLog(
+          'ENGINE_B (QUANT)',
+          `Winning Score, Unit Economics & Ad Hooks calculated via ${quantProvider} (${groqSettled.value.latency}ms).`,
+          'success',
+          groqSettled.value.latency
+        );
+        try {
+          const parsed = extractAndParseJSON(groqSettled.value.text);
+          const arr = parsed?.quantAnalysis || parsed?.products || (Array.isArray(parsed) ? parsed : []);
+          arr.forEach((item, idx) => {
+            const key = item.id || `prod_${idx + 1}`;
+            quantMap[key] = item;
+          });
+        } catch (parseErr) {
+          appendLog('ENGINE_B (QUANT)', `JSON Parse Warning: ${parseErr.message}`, 'warn');
+        }
+      } else {
+        appendLog('ENGINE_B (QUANT)', `Failed: ${groqSettled.reason?.message}`, 'error');
+        addToast('Quant Scoring Engine Error', groqSettled.reason?.message || 'Request failed', 'error');
+      }
+
+      if (openRouterSettled.status === 'fulfilled') {
+        skepticProvider = openRouterSettled.value.provider;
+        appendLog(
+          'ENGINE_C (COUNCIL)',
+          `Ruthless Skeptic verification & sourcing audit completed via ${skepticProvider} (${openRouterSettled.value.latency}ms).`,
+          'success',
+          openRouterSettled.value.latency
+        );
+        try {
+          const parsed = extractAndParseJSON(openRouterSettled.value.text);
+          const arr = parsed?.skepticAnalysis || parsed?.products || (Array.isArray(parsed) ? parsed : []);
+          arr.forEach((item, idx) => {
+            const key = item.id || `prod_${idx + 1}`;
+            skepticMap[key] = item;
+          });
+        } catch (parseErr) {
+          appendLog('ENGINE_C (COUNCIL)', `JSON Parse Warning: ${parseErr.message}`, 'warn');
+        }
+      } else {
+        appendLog('ENGINE_C (COUNCIL)', `Failed: ${openRouterSettled.reason?.message}`, 'error');
+        addToast('Skeptic Council Engine Error', openRouterSettled.reason?.message || 'Request failed', 'error');
+      }
+
+      // SYNTHESIZE ALL 3 AI PERSPECTIVES INTO UNIFIED PRODUCT OBJECTS
+      const synthesizedProducts = baseProducts.map((base, idx) => {
+        const pid = base.id || `prod_${idx + 1}`;
+        const m = marketMap[pid] || Object.values(marketMap)[idx] || {};
+        const q = quantMap[pid] || Object.values(quantMap)[idx] || {};
+        const s = skepticMap[pid] || Object.values(skepticMap)[idx] || {};
+
+        const sourcingCost = Number(q.sourcingCost) > 0 ? Number(q.sourcingCost) : 8.5;
+        const sellingPrice = Number(q.sellingPrice) > sourcingCost ? Number(q.sellingPrice) : 34.99;
+        const estimatedShipping = Number(q.estimatedShipping) >= 0 ? Number(q.estimatedShipping) : 4.0;
+        const estimatedCPA = Number(q.estimatedCPA) >= 0 ? Number(q.estimatedCPA) : 11.0;
+
+        const netDollar = sellingPrice - sourcingCost - estimatedShipping - estimatedCPA - sellingPrice * 0.029;
+        const calculatedMargin = Math.round((netDollar / sellingPrice) * 100);
+        const netProfitMargin =
+          typeof q.netProfitMargin === 'number' && !isNaN(q.netProfitMargin)
+            ? Math.round(q.netProfitMargin)
+            : Math.max(8, calculatedMargin);
+
+        // Normalize verdict to one of the 3 exact badges
+        const rawVerdict = String(s.verdict || '').toUpperCase();
+        let normalizedVerdict = 'TEST WITH CAUTION';
+        if (rawVerdict.includes('MUST') || rawVerdict.includes('LAUNCH')) {
+          normalizedVerdict = 'MUST LAUNCH';
+        } else if (rawVerdict.includes('AVOID') || rawVerdict.includes('SATURATED')) {
+          normalizedVerdict = 'SATURATED - AVOID';
+        }
+
+        const demandScore = Math.min(100, Math.max(15, Number(m.demandScore) || 78));
+        const saturationScore = Math.min(100, Math.max(10, Number(m.saturationScore) || 45));
+        const winningScore = Math.min(100, Math.max(20, Number(q.winningScore) || 82));
+        const viralFactor = Math.min(10, Math.max(1, Number(q.viralFactor) || 8.1));
+
+        return {
+          id: `${pid}_${Date.now()}`,
+          name: base.name || `Winning Candidate #${idx + 1}`,
+          category: base.category || niche,
+          tagline: base.tagline || base.problemSolved || '',
+          problemSolved: base.problemSolved || 'Solves daily consumer friction with high perceived value.',
+          niche,
+          targetMarket,
+          budgetTier,
+           huntedAt: new Date().toISOString(),
+
+          // Scores
+          winningScore,
+          demandScore,
+          saturationScore,
+          viralFactor,
+
+          // Economics
+          sourcingCost,
+          sellingPrice,
+          estimatedShipping,
+          estimatedCPA,
+          netProfitMargin,
+
+          // Market Analysis (Engine A - Gemini)
+          searchIntent: m.searchIntent || 'Strong commercial buyer intent on social & search.',
+          targetDemographics: m.targetDemographics || `Core ${targetMarket} online shoppers aged 22-50.`,
+          trendTrajectory: m.trendTrajectory || 'Sustained upward search momentum.',
+          geminiInsight:
+            m.geminiInsight ||
+            'Strong problem-solving utility combined with visual demonstration potential.',
+          marketProvider,
+
+          // Marketing & Quant (Engine B - Groq)
+          adHooks:
+            Array.isArray(q.adHooks) && q.adHooks.length > 0
+              ? q.adHooks
+              : [
+                  `Stop wasting time with outdated ${niche.toLowerCase()} tools — watch how this works in 5 seconds.`,
+                  `Why everyone in ${targetMarket} is replacing their old setup with the ${base.name}.`,
+                  `I tested the most talked-about ${base.name} to see if it actually lives up to the hype.`
+                ],
+          primaryAdCopy:
+            q.primaryAdCopy ||
+            `Tired of dealing with ${base.problemSolved?.toLowerCase() || 'everyday hassle'}? Meet the ${base.name} — engineered for instant results.`,
+          creativeBlueprint:
+            q.creativeBlueprint ||
+            'Split-screen comparison showing old frustrating method vs 3-second transformation using the product.',
+          targetInterests:
+            Array.isArray(q.targetInterests) && q.targetInterests.length > 0
+              ? q.targetInterests
+              : [niche, 'Online Shopping', 'Gadgets & Innovations', 'Home Improvement'],
+          groqInsight:
+            q.groqInsight ||
+            'Healthy gross markup supports paid social customer acquisition with room for bundle AOV expansion.',
+          quantProvider,
+
+          // Skeptic & Council (Engine C - OpenRouter)
+          verdict: normalizedVerdict,
+          saturationRisk:
+            s.saturationRisk ||
+            'Moderate competition; differentiate via custom landing page offer and fast local fulfillment.',
+          seasonalTrap: s.seasonalTrap || 'Consistent demand profile across quarters.',
+          returnRateRisk: s.returnRateRisk || 'Standard QC inspection advised before bulk shipment.',
+          supplierNegotiationAngle:
+            s.supplierNegotiationAngle ||
+            'Negotiate 15% discount at 300+ units MOQ and request custom branded insert cards.',
+          openRouterInsight:
+            s.openRouterInsight ||
+            'Viable unit economics if creative testing validates a thumb-stop ratio above 28% on TikTok/Reels.',
+          skepticProvider
+        };
+      });
+
+      setProducts(synthesizedProducts);
+      appendLog(
+        'PIPELINE_COMPLETE',
+        `Successfully synthesized ${synthesizedProducts.length} complete winning product dossiers.`,
+        'success'
+      );
+    } catch (err) {
+      appendLog('FATAL_ERROR', err.message || 'Pipeline execution failed.', 'error');
+      addToast('Hunt Pipeline Error', err.message || 'Check your API keys and network connection.', 'error');
+    } finally {
+      setIsHunting(false);
+    }
+  };
+
+  // --------------------------------------------------------------------------
+  // 8. BOOKMARKING & EXPORT (CSV / JSON)
+  // --------------------------------------------------------------------------
+  const isProductSaved = (prod) => {
+    return savedWinners.some((item) => item.name === prod.name && item.niche === prod.niche);
+  };
+
+  const toggleSaveProduct = (prod, e) => {
+    if (e) e.stopPropagation();
+    const exists = isProductSaved(prod);
+    if (exists) {
+      setSavedWinners((prev) =>
+        prev.filter((item) => !(item.name === prod.name && item.niche === prod.niche))
+      );
+      addToast('Removed from Saved Winners', `"${prod.name}" removed from bookmarks.`, 'info');
+    } else {
+      setSavedWinners((prev) => [prod, ...prev]);
+      addToast('Saved to Winners Vault', `"${prod.name}" bookmarked to localStorage.`, 'success');
+    }
+  };
+
+  const exportToCSV = (sourceList) => {
+    const list = sourceList && sourceList.length > 0 ? sourceList : products;
+    if (list.length === 0) {
+      addToast('Nothing to Export', 'Run a product hunt or save winning products first.', 'warning');
+      return;
+    }
+
+    const headers = [
+      'Product Name',
+      'Category',
+      'Niche',
+      'Target Market',
+      'Budget Tier',
+      'Winning Score (0-100)',
+      'AI Consensus Verdict',
+      'Sourcing Cost ($)',
+      'Selling Price ($)',
+      'Shipping ($)',
+      'Est CPA ($)',
+      'Net Profit Margin (%)',
+      'Viral Factor (1-10)',
+      'Demand Score (0-100)',
+      'Saturation Score (0-100)',
+      'Problem Solved',
+      'Top Ad Hook',
+      'Supplier Negotiation Angle'
+    ];
+
+    const escapeCSV = (val) => {
+      const str = String(val ?? '').replace(/"/g, '""');
+      return `"${str}"`;
+    };
+
+    const rows = list.map((p) => [
+      escapeCSV(p.name),
+      escapeCSV(p.category),
+      escapeCSV(p.niche),
+      escapeCSV(p.targetMarket),
+      escapeCSV(p.budgetTier),
+      escapeCSV(p.winningScore),
+      escapeCSV(p.verdict),
+      escapeCSV(p.sourcingCost),
+      escapeCSV(p.sellingPrice),
+      escapeCSV(p.estimatedShipping),
+      escapeCSV(p.estimatedCPA),
+      escapeCSV(p.netProfitMargin),
+      escapeCSV(p.viralFactor),
+      escapeCSV(p.demandScore),
+      escapeCSV(p.saturationScore),
+      escapeCSV(p.problemSolved),
+      escapeCSV(p.adHooks?.[0] || ''),
+      escapeCSV(p.supplierNegotiationAngle)
+    ]);
+
+    const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `winning-products-${niche.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    addToast('CSV Export Downloaded', `Exported ${list.length} product research records.`, 'success');
+  };
+
+  const exportToJSON = (sourceList) => {
+    const list = sourceList && sourceList.length > 0 ? sourceList : products;
+    if (list.length === 0) {
+      addToast('Nothing to Export', 'Run a product hunt or save winning products first.', 'warning');
+      return;
+    }
+
+    const blob = new Blob([JSON.stringify(list, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `winning-products-report-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    addToast('JSON Report Downloaded', `Exported full structured JSON for ${list.length} products.`, 'success');
+  };
+
+  // --------------------------------------------------------------------------
+  // 9. FILTERED & SORTED DISPLAY PRODUCTS
+  // --------------------------------------------------------------------------
+  const displayedProducts = useMemo(() => {
+    const baseList = activeView === 'saved' ? savedWinners : products;
+    const filtered = baseList.filter((p) => {
+      if (verdictFilter === 'ALL') return true;
+      return p.verdict === verdictFilter;
+    });
+
+    return [...filtered].sort((a, b) => {
+      if (sortBy === 'winningScore') return (b.winningScore || 0) - (a.winningScore || 0);
+      if (sortBy === 'profitMargin') return (b.netProfitMargin || 0) - (a.netProfitMargin || 0);
+      if (sortBy === 'demandScore') return (b.demandScore || 0) - (a.demandScore || 0);
+      if (sortBy === 'viralFactor') return (b.viralFactor || 0) - (a.viralFactor || 0);
+      return 0;
+    });
+  }, [products, savedWinners, activeView, sortBy, verdictFilter]);
+
+  // Helper for Verdict Badge styling (Strict Flat Design)
+  const getVerdictStyle = (verdict) => {
+    if (verdict === 'MUST LAUNCH') {
+      return {
+        bg: 'bg-[#10B981]/15',
+        border: 'border-[#10B981]',
+        text: 'text-[#10B981]',
+        icon: CheckCircle2
+      };
+    }
+    if (verdict === 'SATURATED - AVOID') {
+      return {
+        bg: 'bg-[#EF4444]/15',
+        border: 'border-[#EF4444]',
+        text: 'text-[#EF4444]',
+        icon: XCircle
+      };
+    }
+    return {
+      bg: 'bg-[#F59E0B]/15',
+      border: 'border-[#F59E0B]',
+      text: 'text-[#F59E0B]',
+      icon: AlertTriangle
+    };
+  };
+
+  // ============================================================================
+  // RENDER
+  // ============================================================================
+  return (
+    <div className="min-h-screen bg-[#0A0A0C] text-[#F4F4F6] font-sans antialiased selection:bg-[#3B82F6] selection:text-white">
+      {/* ======================================================================
+          FLOATING ACTIONABLE TOAST STACK
+         ====================================================================== */}
+      <div className="fixed bottom-5 right-5 z-50 flex flex-col gap-2 max-w-md w-full pointer-events-none px-4 sm:px-0">
+        {toasts.map((t) => {
+          const isErr = t.type === 'error';
+          const isWarn = t.type === 'warning';
+          const isSuccess = t.type === 'success';
+          return (
+            <div
+              key={t.id}
+              className={`pointer-events-auto flex items-start justify-between gap-3 p-3.5 bg-[#141418] border ${
+                isErr
+                  ? 'border-[#EF4444]'
+                  : isWarn
+                  ? 'border-[#F59E0B]'
+                  : isSuccess
+                  ? 'border-[#10B981]'
+                  : 'border-[#3B82F6]'
+              }`}
+            >
+              <div className="flex items-start gap-2.5">
+                {isErr && <XCircle className="w-4 h-4 text-[#EF4444] shrink-0 mt-0.5" />}
+                {isWarn && <AlertTriangle className="w-4 h-4 text-[#F59E0B] shrink-0 mt-0.5" />}
+                {isSuccess && <CheckCircle2 className="w-4 h-4 text-[#10B981] shrink-0 mt-0.5" />}
+                {!isErr && !isWarn && !isSuccess && (
+                  <Info className="w-4 h-4 text-[#3B82F6] shrink-0 mt-0.5" />
+                )}
+                <div>
+                  <div className="text-xs font-bold uppercase tracking-wider text-white">{t.title}</div>
+                  <div className="text-xs text-[#A1A1AA] mt-0.5 leading-relaxed">{t.message}</div>
+                </div>
+              </div>
+              <button
+                onClick={() => removeToast(t.id)}
+                className="text-[#71717A] hover:text-white p-1"
+                title="Dismiss"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ======================================================================
+          1. TOP COMMAND BAR (STRICT FLAT DESIGN)
+         ====================================================================== */}
+      <header className="sticky top-0 z-30 bg-[#0A0A0C] border-b border-[#232329]">
+        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 h-16 flex flex-wrap items-center justify-between gap-3">
+          {/* Brand Identity */}
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 bg-[#3B82F6] flex items-center justify-center border border-[#60A5FA]">
+              <Cpu className="w-5 h-5 text-white" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-bold tracking-tight text-sm sm:text-base text-white uppercase">
+                  TRIPLE-AI PRODUCT HUNTER
+                </span>
+                <span className="hidden md:inline-block text-[10px] font-mono uppercase px-1.5 py-0.5 bg-[#141418] border border-[#232329] text-[#10B981]">
+                  LIVE ENGINE v3.4
+                </span>
+              </div>
+              <p className="text-[11px] text-[#71717A] hidden sm:block">
+                Multi-LLM E-Commerce Intelligence · Gemini 2.5 + Groq Llama 3.3 + OpenRouter Council
+              </p>
+            </div>
+          </div>
+
+          {/* Triple-Engine Live Status Badges + Action Controls */}
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Engine Status Trigger */}
+            <button
+              onClick={() => setIsConfigOpen((prev) => !prev)}
+              className="flex items-center gap-2.5 px-3 py-1.5 bg-[#141418] hover:bg-[#1C1C22] border border-[#232329] text-xs transition-colors"
+              title="Configure Triple-AI API Keys"
+            >
+              <Key className="w-3.5 h-3.5 text-[#3B82F6]" />
+              <span className="font-semibold text-white hidden xl:inline">API ENGINES:</span>
+
+              {/* Gemini Pill */}
+              <span className="flex items-center gap-1.5 font-mono text-[11px]">
+                <span
+                  className={`w-2 h-2 ${
+                    apiKeys.gemini?.trim()
+                      ? keyStatus.gemini.status === 'error'
+                        ? 'bg-[#EF4444]'
+                        : 'bg-[#10B981]'
+                      : 'bg-[#52525B]'
+                  }`}
+                />
+                <span className={apiKeys.gemini?.trim() ? 'text-white' : 'text-[#71717A]'}>GEMINI</span>
+              </span>
+
+              <span className="text-[#232329]">|</span>
+
+              {/* Groq Pill */}
+              <span className="flex items-center gap-1.5 font-mono text-[11px]">
+                <span
+                  className={`w-2 h-2 ${
+                    apiKeys.groq?.trim()
+                      ? keyStatus.groq.status === 'error'
+                        ? 'bg-[#EF4444]'
+                        : 'bg-[#10B981]'
+                      : 'bg-[#52525B]'
+                  }`}
+                />
+                <span className={apiKeys.groq?.trim() ? 'text-white' : 'text-[#71717A]'}>GROQ</span>
+              </span>
+
+              <span className="text-[#232329]">|</span>
+
+              {/* OpenRouter Pill */}
+              <span className="flex items-center gap-1.5 font-mono text-[11px]">
+                <span
+                  className={`w-2 h-2 ${
+                    apiKeys.openrouter?.trim()
+                      ? keyStatus.openrouter.status === 'error'
+                        ? 'bg-[#EF4444]'
+                        : 'bg-[#10B981]'
+                      : 'bg-[#52525B]'
+                  }`}
+                />
+                <span className={apiKeys.openrouter?.trim() ? 'text-white' : 'text-[#71717A]'}>
+                  OPENROUTER
+                </span>
+              </span>
+
+              {isConfigOpen ? (
+                <ChevronUp className="w-3.5 h-3.5 text-[#A1A1AA]" />
+              ) : (
+                <ChevronDown className="w-3.5 h-3.5 text-[#A1A1AA]" />
+              )}
+            </button>
+
+            {/* View Switcher */}
+            <div className="flex items-center bg-[#141418] border border-[#232329]">
+              <button
+                onClick={() => setActiveView('grid')}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                  activeView === 'grid'
+                    ? 'bg-[#3B82F6] text-white'
+                    : 'text-[#A1A1AA] hover:text-white'
+                }`}
+                title="Product Card Grid"
+              >
+                <LayoutGrid className="w-3.5 h-3.5" />
+                <span className="hidden md:inline">Grid</span>
+              </button>
+              <button
+                onClick={() => setActiveView('matrix')}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium border-l border-[#232329] transition-colors ${
+                  activeView === 'matrix'
+                    ? 'bg-[#3B82F6] text-white'
+                    : 'text-[#A1A1AA] hover:text-white'
+                }`}
+                title="Comparison Matrix Table"
+              >
+                <TableIcon className="w-3.5 h-3.5" />
+                <span className="hidden md:inline">Matrix</span>
+              </button>
+              <button
+                onClick={() => setActiveView('saved')}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium border-l border-[#232329] transition-colors ${
+                  activeView === 'saved'
+                    ? 'bg-[#3B82F6] text-white'
+                    : 'text-[#A1A1AA] hover:text-white'
+                }`}
+                title="Saved Winners Vault"
+              >
+                <Bookmark className="w-3.5 h-3.5" />
+                <span className="hidden md:inline">Saved</span>
+                <span className="px-1.5 py-0.2 bg-[#0A0A0C] text-[10px] font-mono text-[#10B981] border border-[#232329]">
+                  {savedWinners.length}
+                </span>
+              </button>
+            </div>
+
+            {/* Export Buttons */}
+            <button
+              onClick={() => exportToCSV(activeView === 'saved' ? savedWinners : products)}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 bg-[#141418] hover:bg-[#1C1C22] border border-[#232329] text-xs text-[#E4E4E7] transition-colors"
+              title="Export Research Report as CSV"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5 text-[#10B981]" />
+              <span className="hidden lg:inline">CSV</span>
+            </button>
+            <button
+              onClick={() => exportToJSON(activeView === 'saved' ? savedWinners : products)}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 bg-[#141418] hover:bg-[#1C1C22] border border-[#232329] text-xs text-[#E4E4E7] transition-colors"
+              title="Export Raw JSON Data"
+            >
+              <FileJson className="w-3.5 h-3.5 text-[#3B82F6]" />
+              <span className="hidden lg:inline">JSON</span>
+            </button>
+          </div>
+        </div>
+
+        {/* ====================================================================
+            2. COLLAPSIBLE API CONFIGURATION DRAWER (TRIPLE-ENGINE SETUP)
+           ==================================================================== */}
+        {isConfigOpen && (
+          <div className="bg-[#141418] border-b border-[#232329] px-4 sm:px-6 py-5">
+            <div className="max-w-[1600px] mx-auto">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 mb-4 border-b border-[#232329]">
+                <div>
+                  <h2 className="text-sm font-bold uppercase tracking-wider text-white flex items-center gap-2">
+                    <Key className="w-4 h-4 text-[#3B82F6]" />
+                    Triple-AI Engine Configuration (Local Browser Storage)
+                  </h2>
+                  <p className="text-xs text-[#A1A1AA] mt-0.5">
+                    Keys are stored strictly in your browser&apos;s <code className="text-[#10B981]">localStorage</code> and dispatched directly to official endpoints. If only 1 or 2 keys are entered, tasks automatically redistribute across active engines.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={testActiveConnections}
+                    disabled={isTestingKeys}
+                    className="flex items-center gap-2 px-3.5 py-2 bg-[#3B82F6] hover:bg-[#2563EB] disabled:opacity-50 text-white text-xs font-bold uppercase tracking-wider transition-colors"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isTestingKeys ? 'animate-spin' : ''}`} />
+                    {isTestingKeys ? 'Pinging Endpoints...' : 'Test Active Connections'}
+                  </button>
+                  <button
+                    onClick={() => setIsConfigOpen(false)}
+                    className="px-3 py-2 bg-[#0A0A0C] hover:bg-[#1F1F26] border border-[#232329] text-xs text-[#A1A1AA] hover:text-white"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                {/* 1. GOOGLE GEMINI CARD */}
+                <div className="bg-[#0A0A0C] border border-[#232329] p-4 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-bold uppercase tracking-wider text-white flex items-center gap-2">
+                        <span className="w-2 h-2 bg-[#3B82F6]" />
+                        1. Google Gemini API Key
+                      </span>
+                      <span
+                        className={`text-[10px] font-mono uppercase px-1.5 py-0.5 border ${
+                          apiKeys.gemini?.trim()
+                            ? keyStatus.gemini.status === 'error'
+                              ? 'border-[#EF4444] text-[#EF4444]'
+                              : 'border-[#10B981] text-[#10B981]'
+                            : 'border-[#232329] text-[#71717A]'
+                        }`}
+                      >
+                        {apiKeys.gemini?.trim()
+                          ? keyStatus.gemini.message || 'Configured'
+                          : 'Missing'}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-[#A1A1AA] mb-3">
+                      <strong className="text-[#E4E4E7]">Role:</strong> Product Discovery, Deep Market Trend Analysis, Search Intent & Competitor Saturation.
+                    </p>
+                    <input
+                      type="password"
+                      value={apiKeys.gemini}
+                      onChange={(e) => setApiKeys({ ...apiKeys, gemini: e.target.value })}
+                      placeholder="AIzaSy... (Google AI Studio Key)"
+                      className="w-full px-3 py-2 bg-[#141418] border border-[#232329] focus:border-[#3B82F6] focus:outline-none text-xs font-mono text-white"
+                    />
+                  </div>
+                  <div className="mt-2.5 flex items-center justify-between text-[10px] font-mono text-[#71717A]">
+                    <span>Model: gemini-2.5-flash</span>
+                    <span>Hint: Starts with AIza...</span>
+                  </div>
+                </div>
+
+                {/* 2. GROQ LPU CARD */}
+                <div className="bg-[#0A0A0C] border border-[#232329] p-4 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-bold uppercase tracking-wider text-white flex items-center gap-2">
+                        <span className="w-2 h-2 bg-[#10B981]" />
+                        2. Groq Cloud API Key
+                      </span>
+                      <span
+                        className={`text-[10px] font-mono uppercase px-1.5 py-0.5 border ${
+                          apiKeys.groq?.trim()
+                            ? keyStatus.groq.status === 'error'
+                              ? 'border-[#EF4444] text-[#EF4444]'
+                              : 'border-[#10B981] text-[#10B981]'
+                            : 'border-[#232329] text-[#71717A]'
+                        }`}
+                      >
+                        {apiKeys.groq?.trim()
+                          ? keyStatus.groq.message || 'Configured'
+                          : 'Missing'}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-[#A1A1AA] mb-3">
+                      <strong className="text-[#E4E4E7]">Role:</strong> Ultra-Fast Winning Score Calculation, Unit Economics, Profit Breakdown & Viral Ad Hooks.
+                    </p>
+                    <input
+                      type="password"
+                      value={apiKeys.groq}
+                      onChange={(e) => setApiKeys({ ...apiKeys, groq: e.target.value })}
+                      placeholder="gsk_... (Groq Cloud API Key)"
+                      className="w-full px-3 py-2 bg-[#141418] border border-[#232329] focus:border-[#3B82F6] focus:outline-none text-xs font-mono text-white"
+                    />
+                  </div>
+                  <div className="mt-2.5 flex items-center justify-between text-[10px] font-mono text-[#71717A]">
+                    <span>Model: llama-3.3-70b-versatile</span>
+                    <span>Hint: Starts with gsk_...</span>
+                  </div>
+                </div>
+
+                {/* 3. OPENROUTER COUNCIL CARD */}
+                <div className="bg-[#0A0A0C] border border-[#232329] p-4 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-bold uppercase tracking-wider text-white flex items-center gap-2">
+                        <span className="w-2 h-2 bg-[#F59E0B]" />
+                        3. OpenRouter API Key
+                      </span>
+                      <span
+                        className={`text-[10px] font-mono uppercase px-1.5 py-0.5 border ${
+                          apiKeys.openrouter?.trim()
+                            ? keyStatus.openrouter.status === 'error'
+                              ? 'border-[#EF4444] text-[#EF4444]'
+                              : 'border-[#10B981] text-[#10B981]'
+                            : 'border-[#232329] text-[#71717A]'
+                        }`}
+                      >
+                        {apiKeys.openrouter?.trim()
+                          ? keyStatus.openrouter.message || 'Configured'
+                          : 'Missing'}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-[#A1A1AA] mb-2">
+                      <strong className="text-[#E4E4E7]">Role:</strong> Ruthless Skeptic Verification Council, Saturation Traps & Supplier MOQ Negotiation.
+                    </p>
+                    <div className="space-y-2">
+                      <input
+                        type="password"
+                        value={apiKeys.openrouter}
+                        onChange={(e) => setApiKeys({ ...apiKeys, openrouter: e.target.value })}
+                        placeholder="sk-or-v1-... (OpenRouter Key)"
+                        className="w-full px-3 py-2 bg-[#141418] border border-[#232329] focus:border-[#3B82F6] focus:outline-none text-xs font-mono text-white"
+                      />
+                      <select
+                        value={apiKeys.openrouterModel}
+                        onChange={(e) => setApiKeys({ ...apiKeys, openrouterModel: e.target.value })}
+                        className="w-full px-2.5 py-1.5 bg-[#141418] border border-[#232329] text-[11px] font-mono text-[#E4E4E7] focus:outline-none"
+                      >
+                        {OPENROUTER_MODELS.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between text-[10px] font-mono text-[#71717A]">
+                    <span>Auto-fallback enabled</span>
+                    <span>Hint: Starts with sk-or-...</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </header>
+
+      {/* ======================================================================
+          3. MAIN WORKSPACE CONTAINER
+         ====================================================================== */}
+      <main className="max-w-[1600px] mx-auto px-4 sm:px-6 py-6 space-y-6">
+        {/* COMMAND CENTER SEARCH & PARAMETERS BAR */}
+        <section className="bg-[#141418] border border-[#232329] p-5">
+          <form onSubmit={handleHuntProducts} className="space-y-4">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+              {/* Niche / Keyword Input (5 cols) */}
+              <div className="lg:col-span-5">
+                <label className="block text-[11px] font-mono uppercase text-[#A1A1AA] mb-1.5">
+                  1. Target Niche / Product Keyword
+                </label>
+                <div className="relative">
+                  <Search className="w-4 h-4 text-[#71717A] absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={niche}
+                    onChange={(e) => setNiche(e.target.value)}
+                    placeholder="e.g., Smart Kitchen Gadgets, Auto Detailing, Pet Tech..."
+                    className="w-full pl-10 pr-4 py-2.5 bg-[#0A0A0C] border border-[#232329] focus:border-[#3B82F6] focus:outline-none text-sm text-white"
+                  />
+                </div>
+              </div>
+
+              {/* Target Market Selector (2 cols) */}
+              <div className="lg:col-span-2">
+                <label className="block text-[11px] font-mono uppercase text-[#A1A1AA] mb-1.5">
+                  2. Target Market
+                </label>
+                <div className="relative">
+                  <Globe className="w-4 h-4 text-[#71717A] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <select
+                    value={targetMarket}
+                    onChange={(e) => setTargetMarket(e.target.value)}
+                    className="w-full pl-9 pr-3 py-2.5 bg-[#0A0A0C] border border-[#232329] focus:border-[#3B82F6] focus:outline-none text-sm text-white"
+                  >
+                    {TARGET_MARKETS.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Budget / Price Tier (2 cols) */}
+              <div className="lg:col-span-2">
+                <label className="block text-[11px] font-mono uppercase text-[#A1A1AA] mb-1.5">
+                  3. Price / Ticket Tier
+                </label>
+                <div className="relative">
+                  <DollarSign className="w-4 h-4 text-[#71717A] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <select
+                    value={budgetTier}
+                    onChange={(e) => setBudgetTier(e.target.value)}
+                    className="w-full pl-9 pr-3 py-2.5 bg-[#0A0A0C] border border-[#232329] focus:border-[#3B82F6] focus:outline-none text-sm text-white"
+                  >
+                    {BUDGET_TIERS.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Execute Hunt CTA (3 cols) */}
+              <div className="lg:col-span-3 flex items-end">
+                <button
+                  type="submit"
+                  disabled={isHunting}
+                  className="w-full py-2.5 px-4 bg-[#3B82F6] hover:bg-[#2563EB] disabled:opacity-60 text-white font-bold text-xs sm:text-sm uppercase tracking-wider flex items-center justify-center gap-2 border border-[#60A5FA] transition-colors cursor-pointer"
+                >
+                  {isHunting ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Executing Triple-AI...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Zap className="w-4 h-4" />
+                      <span>HUNT WINNING PRODUCTS</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Quick Niche Preset Chips & Hunt Mode Controls */}
+            <div className="pt-3 border-t border-[#232329] flex flex-col xl:flex-row xl:items-center justify-between gap-3">
+              {/* Preset Chips */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[11px] font-mono uppercase text-[#71717A] mr-1">
+                  Quick Niches:
+                </span>
+                {NICHE_PRESETS.map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => setNiche(preset)}
+                    className={`px-2.5 py-1 text-xs border transition-colors ${
+                      niche === preset
+                        ? 'bg-[#3B82F6]/20 border-[#3B82F6] text-white font-medium'
+                        : 'bg-[#0A0A0C] border-[#232329] text-[#A1A1AA] hover:text-white hover:border-[#3F3F46]'
+                    }`}
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
+
+              {/* Hunt Mode Toggle + Custom URL/Signal Injector */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <div className="flex items-center bg-[#0A0A0C] border border-[#232329] p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setHuntMode('live_scraper')}
+                    className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono uppercase transition-colors ${
+                      huntMode === 'live_scraper'
+                        ? 'bg-[#10B981] text-[#0A0A0C] font-bold'
+                        : 'text-[#A1A1AA] hover:text-white'
+                    }`}
+                  >
+                    <Radio className="w-3 h-3" />
+                    Live Web Signal Scraper + AI
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHuntMode('ai_deep_synthesis')}
+                    className={`flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-mono uppercase transition-colors ${
+                      huntMode === 'ai_deep_synthesis'
+                        ? 'bg-[#3B82F6] text-white font-bold'
+                        : 'text-[#A1A1AA] hover:text-white'
+                    }`}
+                  >
+                    <Sparkles className="w-3 h-3" />
+                    Direct 3-AI Synthesis
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowCustomSignalsInput((prev) => !prev)}
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs border transition-colors ${
+                    showCustomSignalsInput || customSignals.trim()
+                      ? 'bg-[#141418] border-[#3B82F6] text-[#3B82F6]'
+                      : 'bg-[#0A0A0C] border-[#232329] text-[#A1A1AA] hover:text-white'
+                  }`}
+                >
+                  <Link2 className="w-3.5 h-3.5" />
+                  <span>
+                    {customSignals.trim()
+                      ? 'Custom Product URLs Active'
+                      : 'Paste Custom URLs / Signals'}
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            {/* Optional Custom URL / Raw Signal Paste Box */}
+            {showCustomSignalsInput && (
+              <div className="pt-3 border-t border-[#232329]">
+                <label className="block text-[11px] font-mono uppercase text-[#A1A1AA] mb-1">
+                  Custom Competitor URLs / AliExpress / Amazon / TikTok Shop Titles (One per line — passed into all 3 AI Engines)
+                </label>
+                <textarea
+                  rows={3}
+                  value={customSignals}
+                  onChange={(e) => setCustomSignals(e.target.value)}
+                  placeholder="Paste specific product titles, Amazon/AliExpress URLs, or TikTok ad observations here to force the 3 AI engines to evaluate or benchmark them..."
+                  className="w-full p-3 bg-[#0A0A0C] border border-[#232329] focus:border-[#3B82F6] focus:outline-none text-xs font-mono text-white"
+                />
+              </div>
+            )}
+          </form>
+        </section>
+
+        {/* ====================================================================
+            4. LIVE EXECUTION TERMINAL & SIGNAL TELEMETRY DRAWER
+           ==================================================================== */}
+        {(terminalLogs.length > 0 || isHunting) && (
+          <section className="bg-[#141418] border border-[#232329]">
+            <div
+              onClick={() => setIsTerminalOpen((prev) => !prev)}
+              className="px-4 py-2.5 bg-[#0A0A0C] border-b border-[#232329] flex items-center justify-between cursor-pointer select-none"
+            >
+              <div className="flex items-center gap-2.5">
+                <Terminal className="w-4 h-4 text-[#10B981]" />
+                <span className="text-xs font-mono uppercase font-bold tracking-wider text-white">
+                  Multi-AI Execution Pipeline Telemetry
+                </span>
+                {isHunting && (
+                  <span className="px-2 py-0.5 text-[10px] font-mono uppercase bg-[#3B82F6]/20 border border-[#3B82F6] text-[#3B82F6] animate-pulse">
+                    RUNNING PARALLEL QUERIES...
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-3 text-xs font-mono text-[#71717A]">
+                <span>{terminalLogs.length} events</span>
+                { scrapedSignals.length > 0 && (
+                  <span className="text-[#10B981]">{scrapedSignals.length} live signals</span>
+                )}
+                {isTerminalOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              </div>
+            </div>
+
+            {isTerminalOpen && (
+              <div className="p-4 grid grid-cols-1 lg:grid-cols-12 gap-4">
+                {/* Terminal Log Output (8 cols) */}
+                <div className="lg:col-span-8 bg-[#0A0A0C] border border-[#232329] p-3 max-h-48 overflow-y-auto font-mono text-xs space-y-1.5">
+                  {terminalLogs.map((log) => (
+                    <div key={log.id} className="flex items-start gap-2 leading-relaxed">
+                      <span className="text-[#52525B] shrink-0">[{log.timestamp}]</span>
+                      <span
+                        className={`shrink-0 font-bold ${
+                          log.status === 'success'
+                            ? 'text-[#10B981]'
+                            : log.status === 'warn'
+                            ? 'text-[#F59E0B]'
+                            : log.status === 'error'
+                            ? 'text-[#EF4444]'
+                            : 'text-[#3B82F6]'
+                        }`}
+                      >
+                        [{log.engine}]
+                      </span>
+                      <span className="text-[#E4E4E7] break-words">{log.message}</span>
+                    </div>
+                  ))}
+                  <div ref={terminalEndRef} />
+                </div>
+
+                {/* Live Scraped Web Signals Feed (4 cols) */}
+                <div className="lg:col-span-4 bg-[#0A0A0C] border border-[#232329] p-3 max-h-48 overflow-y-auto">
+                  <div className="text-[10px] font-mono uppercase text-[#A1A1AA] mb-2 flex items-center justify-between">
+                    <span>Scraped Community Signals (Reddit / HN)</span>
+                    <span className="text-[#10B981]">{scrapedSignals.length} hits</span>
+                  </div>
+                  {scrapedSignals.length === 0 ? (
+                    <div className="text-xs text-[#71717A] font-mono py-4 text-center">
+                      {isHunting
+                        ? 'Fetching live JSON feeds...'
+                        : 'No external forum signals cached for this run.'}
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {scrapedSignals.map((sig, i) => (
+                        <div key={i} className="border-b border-[#232329] pb-1.5 last:border-b-0">
+                          <div className="flex items-center justify-between text-[10px] font-mono">
+                            <span className="text-[#3B82F6]">{sig.source}</span>
+                            <span className="text-[#71717A]">{sig.engagement}</span>
+                          </div>
+                          <div className="text-xs text-[#E4E4E7] line-clamp-1 mt-0.5">{sig.title}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* ====================================================================
+            5. FILTER, SORT & SUMMARY METRICS BAR
+           ==================================================================== */}
+        <section className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-[#141418] border border-[#232329] px-4 py-3">
+          <div className="flex items-center gap-3 flex-wrap">
+            <span className="text-xs font-mono uppercase text-[#A1A1AA]">
+              {activeView === 'saved'
+                ? `Saved Winners Vault (${displayedProducts.length})`
+                : `Analyzed Candidates (${displayedProducts.length})`}
+            </span>
+
+            <span className="text-[#232329]">|</span>
+
+            {/* Verdict Filter Pills */}
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {['ALL', 'MUST LAUNCH', 'TEST WITH CAUTION', 'SATURATED - AVOID'].map((v) => (
+                <button
+                  key={v}
+                  onClick={() => setVerdictFilter(v)}
+                  className={`px-2.5 py-1 text-[11px] font-mono uppercase border transition-colors ${
+                    verdictFilter === v
+                      ? v === 'MUST LAUNCH'
+                        ? 'bg-[#10B981] text-[#0A0A0C] border-[#10B981] font-bold'
+                        : v === 'SATURATED - AVOID'
+                        ? 'bg-[#EF4444] text-white border-[#EF4444] font-bold'
+                        : v === 'TEST WITH CAUTION'
+                        ? 'bg-[#F59E0B] text-[#0A0A0C] border-[#F59E0B] font-bold'
+                        : 'bg-[#3B82F6] text-white border-[#3B82F6] font-bold'
+                      : 'bg-[#0A0A0C] border-[#232329] text-[#A1A1AA] hover:text-white'
+                  }`}
+                >
+                  {v}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Sort Selector */}
+          <div className="flex items-center gap-2">
+            <ArrowUpDown className="w-3.5 h-3.5 text-[#71717A]" />
+            <span className="text-xs font-mono uppercase text-[#A1A1AA]">Sort By:</span>
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value)}
+              className="px-2.5 py-1 bg-[#0A0A0C] border border-[#232329] text-xs font-mono text-white focus:outline-none"
+            >
+              <option value="winningScore">Winning Score (High → Low)</option>
+              <option value="profitMargin">Net Profit Margin % (High → Low)</option>
+              <option value="demandScore">Market Demand (High → Low)</option>
+              <option value="viralFactor">Viral / Wow Factor (High → Low)</option>
+            </select>
+          </div>
+        </section>
+
+        {/* ====================================================================
+            6. EMPTY STATE (WHEN NO PRODUCTS HUNTED YET)
+           ==================================================================== */}
+        {displayedProducts.length === 0 && !isHunting && (
+          <section className="bg-[#141418] border border-[#232329] p-10 text-center max-w-3xl mx-auto my-8">
+            <div className="w-12 h-12 bg-[#0A0A0C] border border-[#232329] flex items-center justify-center mx-auto mb-4">
+              <Layers className="w-6 h-6 text-[#3B82F6]" />
+            </div>
+            <h3 className="text-lg font-bold uppercase tracking-wide text-white">
+              {activeView === 'saved'
+                ? 'Your Saved Winners Vault is Empty'
+                : 'Ready to Execute Live Multi-AI Product Hunting'}
+            </h3>
+            <p className="text-xs sm:text-sm text-[#A1A1AA] mt-2 leading-relaxed max-w-xl mx-auto">
+              {activeView === 'saved'
+                ? 'Bookmark any analyzed product card to store it permanently in your browser and export custom CSV reports.'
+                : 'Enter your Google Gemini, Groq, or OpenRouter API key in the top configuration drawer, pick a niche, and click "HUNT WINNING PRODUCTS" to run real-time web signal scraping & parallel LLM scoring.'}
+            </p>
+            <div className="mt-6 flex items-center justify-center gap-3 flex-wrap">
+              {activeEngines.length === 0 ? (
+                <button
+                  onClick={() => setIsConfigOpen(true)}
+                  className="px-5 py-2.5 bg-[#3B82F6] hover:bg-[#2563EB] text-white text-xs font-bold uppercase tracking-wider flex items-center gap-2"
+                >
+                  <Key className="w-4 h-4" />
+                  Configure API Keys ({activeEngines.length}/3 Active)
+                </button>
+              ) : (
+                <button
+                  onClick={handleHuntProducts}
+                  className="px-5 py-2.5 bg-[#10B981] hover:bg-[#059669] text-[#0A0A0C] text-xs font-bold uppercase tracking-wider flex items-center gap-2"
+                >
+                  <Play className="w-4 h-4" />
+                  Launch Live Hunt for &ldquo;{niche}&rdquo;
+                </button>
+              )}
+            </div>
+          </section>
+        )}
+
+        {/* ====================================================================
+            7A. WINNING PRODUCT GRID VIEW
+           ==================================================================== */}
+        {(activeView === 'grid' || activeView === 'saved') && displayedProducts.length > 0 && (
+          <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+            {displayedProducts.map((product) => {
+              const vStyle = getVerdictStyle(product.verdict);
+              const VerdictIcon = vStyle.icon;
+              const saved = isProductSaved(product);
+
+              return (
+                <article
+                  key={product.id}
+                  onClick={() => {
+                    setSelectedProduct(product);
+                    setDrawerTab('calculator');
+                  }}
+                  className="bg-[#141418] hover:bg-[#18181E] border border-[#232329] hover:border-[#3B82F6] transition-colors flex flex-col justify-between cursor-pointer group"
+                >
+                  {/* Top Header */}
+                  <div className="p-5 border-b border-[#232329]">
+                    <div className="flex items-start justify-between gap-3 mb-3">
+                      <span className="px-2 py-0.5 bg-[#0A0A0C] border border-[#232329] text-[10px] font-mono uppercase text-[#A1A1AA]">
+                        {product.category}
+                      </span>
+
+                      <div className="flex items-center gap-2">
+                        {/* AI Consensus Verdict Badge */}
+                        <span
+                          className={`flex items-center gap-1 px-2 py-0.5 border text-[10px] font-mono font-bold uppercase ${vStyle.bg} ${vStyle.border} ${vStyle.text}`}
+                        >
+                          <VerdictIcon className="w-3 h-3" />
+                          {product.verdict}
+                        </span>
+
+                        {/* Bookmark Button */}
+                        <button
+                          onClick={(e) => toggleSaveProduct(product, e)}
+                          className={`p-1.5 border transition-colors ${
+                            saved
+                              ? 'bg-[#3B82F6] border-[#3B82F6] text-white'
+                              : 'bg-[#0A0A0C] border-[#232329] text-[#71717A] hover:text-white'
+                          }`}
+                          title={saved ? 'Remove from Saved Winners' : 'Save to Winners Vault'}
+                        >
+                          <Bookmark className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Product Title & Problem Solved */}
+                    <h3 className="text-base font-bold text-white group-hover:text-[#3B82F6] transition-colors leading-snug">
+                      {product.name}
+                    </h3>
+                    <p className="text-xs text-[#A1A1AA] mt-1.5 line-clamp-2 leading-relaxed">
+                      {product.problemSolved}
+                    </p>
+                  </div>
+
+                  {/* Core Metrics Body */}
+                  <div className="p-5 space-y-4">
+                    {/* Winning Score + Unit Economics Row */}
+                    <div className="grid grid-cols-3 gap-2 bg-[#0A0A0C] border border-[#232329] p-3">
+                      <div>
+                        <div className="text-[10px] font-mono uppercase text-[#71717A]">
+                          Winning Score
+                        </div>
+                        <div className="text-lg font-mono font-bold text-[#10B981] mt-0.5">
+                          {product.winningScore}
+                          <span className="text-xs text-[#71717A]">/100</span>
+                        </div>
+                      </div>
+
+                      <div className="border-l border-[#232329] pl-3">
+                        <div className="text-[10px] font-mono uppercase text-[#71717A]">
+                          COGS → Retail
+                        </div>
+                        <div className="text-sm font-mono font-bold text-white mt-1">
+                          ${Number(product.sourcingCost).toFixed(2)}{' '}
+                          <span className="text-[#71717A]">→</span> $
+                          {Number(product.sellingPrice).toFixed(2)}
+                        </div>
+                      </div>
+
+                      <div className="border-l border-[#232329] pl-3">
+                        <div className="text-[10px] font-mono uppercase text-[#71717A]">
+                          Viral Factor
+                        </div>
+                        <div className="text-sm font-mono font-bold text-[#3B82F6] mt-1">
+                          {product.viralFactor} <span className="text-xs text-[#71717A]">/ 10</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Net Profit Margin Bar */}
+                    <div>
+                      <div className="flex items-center justify-between text-xs font-mono mb-1">
+                        <span className="text-[#A1A1AA] uppercase text-[11px]">
+                          Est. Net Profit Margin
+                        </span>
+                        <span
+                          className={`font-bold ${
+                            product.netProfitMargin >= 35
+                              ? 'text-[#10B981]'
+                              : product.netProfitMargin >= 20
+                              ? 'text-[#F59E0B]'
+                              : 'text-[#EF4444]'
+                          }`}
+                        >
+                          {product.netProfitMargin}% Net
+                        </span>
+                      </div>
+                      <div className="w-full h-2 bg-[#0A0A0C] border border-[#232329]">
+                        <div
+                          className={`h-full ${
+                            product.netProfitMargin >= 35
+                              ? 'bg-[#10B981]'
+                              : product.netProfitMargin >= 20
+                              ? 'bg-[#F59E0B]'
+                              : 'bg-[#EF4444]'
+                          }`}
+                          style={{
+                            width: `${Math.min(100, Math.max(8, product.netProfitMargin))}%`
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Demand vs Saturation Dual Meter */}
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <div className="flex items-center justify-between text-[11px] font-mono mb-1">
+                          <span className="text-[#A1A1AA]">DEMAND</span>
+                          <span className="text-[#10B981] font-bold">{product.demandScore}/100</span>
+                        </div>
+                        <div className="w-full h-1.5 bg-[#0A0A0C] border border-[#232329]">
+                          <div
+                            className="h-full bg-[#10B981]"
+                            style={{ width: `${product.demandScore}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between text-[11px] font-mono mb-1">
+                          <span className="text-[#A1A1AA]">SATURATION</span>
+                          <span
+                            className={`font-bold ${
+                              product.saturationScore > 70
+                                ? 'text-[#EF4444]'
+                                : product.saturationScore > 45
+                                ? 'text-[#F59E0B]'
+                                : 'text-[#10B981]'
+                            }`}
+                          >
+                            {product.saturationScore}/100
+                          </span>
+                        </div>
+                        <div className="w-full h-1.5 bg-[#0A0A0C] border border-[#232329]">
+                          <div
+                            className={`h-full ${
+                              product.saturationScore > 70
+                                ? 'bg-[#EF4444]'
+                                : product.saturationScore > 45
+                                ? 'bg-[#F59E0B]'
+                                : 'bg-[#3B82F6]'
+                            }`}
+                            style={{ width: `${product.saturationScore}%` }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Preview Top Viral Hook */}
+                    <div className="bg-[#0A0A0C] border border-[#232329] p-2.5">
+                      <div className="text-[10px] font-mono uppercase text-[#3B82F6] mb-0.5">
+                        Top Groq Viral Ad Hook:
+                      </div>
+                      <p className="text-xs text-[#E4E4E7] line-clamp-2 italic">
+                        &ldquo;{product.adHooks?.[0]}&rdquo;
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Card Footer */}
+                  <div className="px-5 py-3 bg-[#0A0A0C] border-t border-[#232329] flex items-center justify-between text-xs">
+                    <span className="font-mono text-[11px] text-[#71717A]">
+                      Market: <strong className="text-[#E4E4E7]">{product.targetMarket}</strong>
+                    </span>
+                    <span className="font-mono text-[11px] text-[#3B82F6] group-hover:underline flex items-center gap-1 font-semibold">
+                      Open 3-AI Deep Dive <ChevronRight className="w-3.5 h-3.5" />
+                    </span>
+                  </div>
+                </article>
+              );
+            })}
+          </section>
+        )}
+
+        {/* ====================================================================
+            7B. COMPARISON MATRIX TABLE VIEW
+           ==================================================================== */}
+        {activeView === 'matrix' && displayedProducts.length > 0 && (
+          <section className="bg-[#141418] border border-[#232329] overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="bg-[#0A0A0C] border-b border-[#232329] text-[11px] font-mono uppercase text-[#A1A1AA]">
+                  <th className="p-3.5">Product / Category</th>
+                  <th className="p-3.5">Winning Score</th>
+                  <th className="p-3.5">COGS / Retail</th>
+                  <th className="p-3.5">Net Margin</th>
+                  <th className="p-3.5">Demand vs Sat.</th>
+                  <th className="p-3.5">Viral Factor</th>
+                  <th className="p-3.5">Council Verdict</th>
+                  <th className="p-3.5 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#232329] text-xs">
+                {displayedProducts.map((product) => {
+                  const vStyle = getVerdictStyle(product.verdict);
+                  const saved = isProductSaved(product);
+                  return (
+                    <tr
+                      key={product.id}
+                      onClick={() => {
+                        setSelectedProduct(product);
+                        setDrawerTab('calculator');
+                      }}
+                      className="hover:bg-[#1C1C22] cursor-pointer transition-colors"
+                    >
+                      <td className="p-3.5 max-w-xs">
+                        <div className="font-bold text-white">{product.name}</div>
+                        <div className="text-[11px] text-[#71717A] font-mono mt-0.5">
+                          {product.category} · {product.targetMarket}
+                        </div>
+                      </td>
+                      <td className="p-3.5 font-mono font-bold text-sm text-[#10B981]">
+                        {product.winningScore}/100
+                      </td>
+                      <td className="p-3.5 font-mono text-white">
+                        ${Number(product.sourcingCost).toFixed(2)} → $
+                        {Number(product.sellingPrice).toFixed(2)}
+                      </td>
+                      <td className="p-3.5 font-mono font-bold">
+                        <span
+                          className={
+                            product.netProfitMargin >= 35
+                              ? 'text-[#10B981]'
+                              : product.netProfitMargin >= 20
+                              ? 'text-[#F59E0B]'
+                              : 'text-[#EF4444]'
+                          }
+                        >
+                          {product.netProfitMargin}%
+                        </span>
+                      </td>
+                      <td className="p-3.5 font-mono">
+                        <span className="text-[#10B981]">{product.demandScore}D</span>
+                        <span className="text-[#52525B] mx-1">/</span>
+                        <span className="text-[#F59E0B]">{product.saturationScore}S</span>
+                      </td>
+                      <td className="p-3.5 font-mono text-[#3B82F6] font-bold">
+                        {product.viralFactor}/10
+                      </td>
+                      <td className="p-3.5">
+                        <span
+                          className={`inline-block px-2 py-0.5 border text-[10px] font-mono font-bold uppercase ${vStyle.bg} ${vStyle.border} ${vStyle.text}`}
+                        >
+                          {product.verdict}
+                        </span>
+                      </td>
+                      <td className="p-3.5 text-right space-x-2">
+                        <button
+                          onClick={(e) => toggleSaveProduct(product, e)}
+                          className={`px-2 py-1 border text-[11px] font-mono ${
+                            saved
+                              ? 'bg-[#3B82F6] border-[#3B82F6] text-white'
+                              : 'bg-[#0A0A0C] border-[#232329] text-[#A1A1AA]'
+                          }`}
+                        >
+                          {saved ? 'Saved' : 'Save'}
+                        </button>
+                        <button className="px-2.5 py-1 bg-[#0A0A0C] border border-[#232329] text-[#3B82F6] font-mono text-[11px]">
+                          Inspect
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </section>
+        )}
+      </main>
+
+      {/* ======================================================================
+          8. DEEP-DIVE PRODUCT DRAWER (3 TABS: CALCULATOR, MARKETING, 3-AI DEBATE)
+         ====================================================================== */}
+      {selectedProduct && (
+        <ProductDeepDiveDrawer
+          product={selectedProduct}
+          activeTab={drawerTab}
+          setActiveTab={setDrawerTab}
+          onClose={() => setSelectedProduct(null)}
+          isSaved={isProductSaved(selectedProduct)}
+          onToggleSave={(e) => toggleSaveProduct(selectedProduct, e)}
+          onCopy={copyToClipboard}
+          copiedId={copiedId}
+          getVerdictStyle={getVerdictStyle}
+        />
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// SUB-COMPONENT: DEEP-DIVE DRAWER (PROFIT CALCULATOR + AD PACK + 3-AI DEBATE)
+// ============================================================================
+function ProductDeepDiveDrawer({
+  product,
+  activeTab,
+  setActiveTab,
+  onClose,
+  isSaved,
+  onToggleSave,
+  onCopy,
+  copiedId,
+  getVerdictStyle
+}) {
+  // Interactive Profit & Sourcing Calculator State initialized from product values
+  const [cogs, setCogs] = useState(Number(product.sourcingCost) || 8.5);
+  const [sellingPrice, setSellingPrice] = useState(Number(product.sellingPrice) || 39.99);
+  const [shippingCost, setShippingCost] = useState(Number(product.estimatedShipping) || 4.5);
+  const [cpa, setCpa] = useState(Number(product.estimatedCPA) || 12.0);
+  const [processingFeePct, setProcessingFeePct] = useState(2.9);
+  const [monthlyUnits, setMonthlyUnits] = useState(300);
+
+  // Sync calculator sliders when switching products
+  useEffect(() => {
+    setCogs(Number(product.sourcingCost) || 8.5);
+    setSellingPrice(Number(product.sellingPrice) || 39.99);
+    setShippingCost(Number(product.estimatedShipping) || 4.5);
+    setCpa(Number(product.estimatedCPA) || 12.0);
+  }, [product]);
+
+  // Real-time Unit Economics math
+  const paymentFeeDollar = (sellingPrice * processingFeePct) / 100 + 0.3;
+  const totalLandedCost = cogs + shippingCost + paymentFeeDollar;
+  const grossMarginBeforeAds = sellingPrice - totalLandedCost;
+  const netProfitPerUnit = grossMarginBeforeAds - cpa;
+  const netMarginPct = sellingPrice > 0 ? Math.round((netProfitPerUnit / sellingPrice) * 100) : 0;
+  const breakEvenROAS =
+    grossMarginBeforeAds > 0 ? (sellingPrice / grossMarginBeforeAds).toFixed(2) : '∞';
+  const achievedROAS = cpa > 0 ? (sellingPrice / cpa).toFixed(2) : '∞';
+  const monthlyRevenue = Math.round(sellingPrice * monthlyUnits);
+  const monthlyNetProfit = Math.round(netProfitPerUnit * monthlyUnits);
+
+  const vStyle = getVerdictStyle(product.verdict);
+  const VerdictIcon = vStyle.icon;
+
+  return (
+    <div className="fixed inset-0 z-40 bg-black/75 flex justify-end">
+      <div
+        className="w-full max-w-4xl bg-[#0A0A0C] border-l border-[#232329] h-full flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Drawer Header */}
+        <div className="p-5 bg-[#141418] border-b border-[#232329] flex items-start justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2 flex-wrap mb-2">
+              <span className="px-2 py-0.5 bg-[#0A0A0C] border border-[#232329] text-[10px] font-mono uppercase text-[#A1A1AA]">
+                {product.category}
+              </span>
+              <span className="px-2 py-0.5 bg-[#0A0A0C] border border-[#232329] text-[10px] font-mono uppercase text-[#3B82F6]">
+                Market: {product.targetMarket}
+              </span>
+              <span
+                className={`flex items-center gap-1 px-2 py-0.5 border text-[10px] font-mono font-bold uppercase ${vStyle.bg} ${vStyle.border} ${vStyle.text}`}
+              >
+                <VerdictIcon className="w-3 h-3" />
+                {product.verdict}
+              </span>
+              <span className="px-2 py-0.5 bg-[#10B981]/15 border border-[#10B981] text-[#10B981] text-[10px] font-mono font-bold">
+                SCORE: {product.winningScore}/100
+              </span>
+            </div>
+            <h2 className="text-lg sm:text-xl font-bold text-white">{product.name}</h2>
+            <p className="text-xs text-[#A1A1AA] mt-1">{product.problemSolved}</p>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={onToggleSave}
+              className={`flex items-center gap-1.5 px-3 py-1.5 border text-xs font-mono uppercase transition-colors ${
+                isSaved
+                  ? 'bg-[#3B82F6] border-[#3B82F6] text-white'
+                  : 'bg-[#0A0A0C] border-[#232329] text-[#A1A1AA] hover:text-white'
+              }`}
+            >
+              <Bookmark className="w-3.5 h-3.5" />
+              {isSaved ? 'Bookmarked' : 'Bookmark'}
+            </button>
+            <button
+              onClick={onClose}
+              className="p-2 bg-[#0A0A0C] hover:bg-[#1F1F26] border border-[#232329] text-[#A1A1AA] hover:text-white"
+              title="Close Drawer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+
+        {/* Drawer Tab Navigation */}
+        <div className="flex border-b border-[#232329] bg-[#141418] px-5">
+          <button
+            onClick={() => setActiveTab('calculator')}
+            className={`flex items-center gap-2 px-4 py-3 text-xs font-bold uppercase tracking-wider border-b-2 transition-colors ${
+              activeTab === 'calculator'
+                ? 'border-[#3B82F6] text-white bg-[#0A0A0C]'
+                : 'border-transparent text-[#A1A1AA] hover:text-white'
+            }`}
+          >
+            <Calculator className="w-4 h-4 text-[#10B981]" />
+            Tab 1: Profit & Sourcing Calculator
+          </button>
+
+          <button
+            onClick={() => setActiveTab('marketing')}
+            className={`flex items-center gap-2 px-4 py-3 text-xs font-bold uppercase tracking-wider border-b-2 transition-colors ${
+              activeTab === 'marketing'
+                ? 'border-[#3B82F6] text-white bg-[#0A0A0C]'
+                : 'border-transparent text-[#A1A1AA] hover:text-white'
+            }`}
+          >
+            <Megaphone className="w-4 h-4 text-[#3B82F6]" />
+            Tab 2: AI Marketing Pack (Groq)
+          </button>
+
+          <button
+            onClick={() => setActiveTab('debate')}
+            className={`flex items-center gap-2 px-4 py-3 text-xs font-bold uppercase tracking-wider border-b-2 transition-colors ${
+              activeTab === 'debate'
+                ? 'border-[#3B82F6] text-white bg-[#0A0A0C]'
+                : 'border-transparent text-[#A1A1AA] hover:text-white'
+            }`}
+          >
+            <Scale className="w-4 h-4 text-[#F59E0B]" />
+            Tab 3: 3-AI Debate & Sourcing
+          </button>
+        </div>
+
+        {/* Drawer Body Content */}
+        <div className="p-6 overflow-y-auto flex-1 space-y-6">
+          {/* ================================================================
+              TAB 1: INTERACTIVE PROFIT & SOURCING CALCULATOR
+             ================================================================ */}
+          {activeTab === 'calculator' && (
+            <div className="space-y-6">
+              {/* Top KPI Summary Cards */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="bg-[#141418] border border-[#232329] p-4">
+                  <div className="text-[10px] font-mono uppercase text-[#A1A1AA]">
+                    Net Profit / Unit
+                  </div>
+                  <div
+                    className={`text-xl font-mono font-bold mt-1 ${
+                      netProfitPerUnit > 0 ? 'text-[#10B981]' : 'text-[#EF4444]'
+                    }`}
+                  >
+                    ${netProfitPerUnit.toFixed(2)}
+                  </div>
+                  <div className="text-[11px] font-mono text-[#71717A] mt-0.5">
+                    Margin: {netMarginPct}%
+                  </div>
+                </div>
+
+                <div className="bg-[#141418] border border-[#232329] p-4">
+                  <div className="text-[10px] font-mono uppercase text-[#A1A1AA]">
+                    Break-Even ROAS
+                  </div>
+                  <div className="text-xl font-mono font-bold text-white mt-1">
+                    {breakEvenROAS}x
+                  </div>
+                  <div className="text-[11px] font-mono text-[#3B82F6] mt-0.5">
+                    Current ROAS: {achievedROAS}x
+                  </div>
+                </div>
+
+                <div className="bg-[#141418] border border-[#232329] p-4">
+                  <div className="text-[10px] font-mono uppercase text-[#A1A1AA]">
+                    Monthly Revenue
+                  </div>
+                  <div className="text-xl font-mono font-bold text-white mt-1">
+                    ${monthlyRevenue.toLocaleString()}
+                  </div>
+                  <div className="text-[11px] font-mono text-[#71717A] mt-0.5">
+                    @ {monthlyUnits} orders/mo
+                  </div>
+                </div>
+
+                <div className="bg-[#141418] border border-[#232329] p-4">
+                  <div className="text-[10px] font-mono uppercase text-[#A1A1AA]">
+                    Monthly Net Profit
+                  </div>
+                  <div
+                    className={`text-xl font-mono font-bold mt-1 ${
+                      monthlyNetProfit > 0 ? 'text-[#10B981]' : 'text-[#EF4444]'
+                    }`}
+                  >
+                    ${monthlyNetProfit.toLocaleString()}
+                  </div>
+                  <div className="text-[11px] font-mono text-[#71717A] mt-0.5">
+                    After COGS + Ads + Fees
+                  </div>
+                </div>
+              </div>
+
+              {/* Interactive Sliders Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5 bg-[#141418] border border-[#232329] p-5">
+                {/* Selling Price Slider */}
+                <div>
+                  <div className="flex justify-between text-xs font-mono mb-1.5">
+                    <span className="text-[#A1A1AA] uppercase">Retail Selling Price ($)</span>
+                    <span className="text-white font-bold">${sellingPrice.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="5"
+                    max="250"
+                    step="0.5"
+                    value={sellingPrice}
+                    onChange={(e) => setSellingPrice( parseFloat(e.target.value) )}
+                    className="w-full accent-[#3B82F6] cursor-pointer"
+                  />
+                </div>
+
+                {/* Manufacturing / Sourcing COGS Slider */}
+                <div>
+                  <div className="flex justify-between text-xs font-mono mb-1.5">
+                    <span className="text-[#A1A1AA] uppercase">Unit Sourcing Cost / COGS ($)</span>
+                    <span className="text-white font-bold">${cogs.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.5"
+                    max="120"
+                    step="0.25"
+                    value={cogs}
+                    onChange={(e) => setCogs( parseFloat(e.target.value) )}
+                    className="w-full accent-[#3B82F6] cursor-pointer"
+                  />
+                </div>
+
+                {/* Ad Spend CPA Slider */}
+                <div>
+                  <div className="flex justify-between text-xs font-mono mb-1.5">
+                    <span className="text-[#A1A1AA] uppercase">Target Ad CPA / CAC ($)</span>
+                    <span className="text-[#F59E0B] font-bold">${cpa.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="1"
+                    max="80"
+                    step="0.5"
+                    value={cpa}
+                    onChange={(e) => setCpa( parseFloat(e.target.value) )}
+                    className="w-full accent-[#F59E0B] cursor-pointer"
+                  />
+                </div>
+
+                {/* Fulfillment / Shipping Cost Slider */}
+                <div>
+                  <div className="flex justify-between text-xs font-mono mb-1.5">
+                    <span className="text-[#A1A1AA] uppercase">3PL / ePacket Shipping ($)</span>
+                    <span className="text-white font-bold">${shippingCost.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="35"
+                    step="0.5"
+                    value={shippingCost}
+                    onChange={(e) => setShippingCost( parseFloat(e.target.value) )}
+                    className="w-full accent-[#3B82F6] cursor-pointer"
+                  />
+                </div>
+
+                {/* Monthly Order Volume Slider */}
+                <div>
+                  <div className="flex justify-between text-xs font-mono mb-1.5">
+                    <span className="text-[#A1A1AA] uppercase">Projected Monthly Sales (Units)</span>
+                    <span className="text-[#10B981] font-bold">{monthlyUnits} units</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="10"
+                    max="3000"
+                    step="10"
+                    value={monthlyUnits}
+                    onChange={(e) => setMonthlyUnits( parseInt(e.target.value, 10) )}
+                    className="w-full accent-[#10B981] cursor-pointer"
+                  />
+                </div>
+
+                {/* Payment Gateway Fee Slider */}
+                <div>
+                  <div className="flex justify-between text-xs font-mono mb-1.5">
+                    <span className="text-[#A1A1AA] uppercase">Payment Processing Fee (%)</span>
+                    <span className="text-white font-bold">{processingFeePct.toFixed(1)}% + $0.30</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="8"
+                    step="0.1"
+                    value={processingFeePct}
+                    onChange={(e) => setProcessingFeePct( parseFloat(e.target.value) )}
+                    className="w-full accent-[#3B82F6] cursor-pointer"
+                  />
+                </div>
+              </div>
+
+              {/* Supplier Negotiation & Sourcing Intelligence Box */}
+              <div className="bg-[#141418] border border-[#232329] p-5 space-y-3">
+                <div className="text-xs font-mono uppercase text-[#10B981] font-bold flex items-center gap-2">
+                  <Package className="w-4 h-4" />
+                  Supplier & Alibaba MOQ Negotiation Playbook
+                </div>
+                <p className="text-xs text-[#E4E4E7] leading-relaxed">
+                  {product.supplierNegotiationAngle}
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+                  <div className="bg-[#0A0A0C] border border-[#232329] p-3">
+                    <div className="text-[10px] font-mono uppercase text-[#A1A1AA]">
+                      Quality & Return Rate Audit
+                    </div>
+                    <p className="text-xs text-[#E4E4E7] mt-1">{product.returnRateRisk}</p>
+                  </div>
+                  <div className="bg-[#0A0A0C] border border-[#232329] p-3">
+                    <div className="text-[10px] font-mono uppercase text-[#A1A1AA]">
+                      Seasonality & Inventory Timing
+                    </div>
+                    <p className="text-xs text-[#E4E4E7] mt-1">{product.seasonalTrap}</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ================================================================
+              TAB 2: AI MARKETING PACK (GROQ GENERATED HOOKS & COPY)
+             ================================================================ */}
+          {activeTab === 'marketing' && (
+            <div className="space-y-5">
+              {/* 3 Scroll-Stopping TikTok / Reels Hooks */}
+              <div className="bg-[#141418] border border-[#232329] p-5">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-xs font-mono uppercase font-bold text-[#3B82F6] flex items-center gap-2">
+                    <Zap className="w-4 h-4" />
+                    3 High-Converting TikTok / Meta Video Hooks (First 3 Seconds)
+                  </h3>
+                  <span className="text-[10px] font-mono text-[#71717A]">
+                    Generated via {product.quantProvider}
+                  </span>
+                </div>
+                <div className="space-y-2.5">
+                  {(product.adHooks || []).map((hook, idx) => {
+                    const cid = `hook_${idx}`;
+                    return (
+                      <div
+                        key={idx}
+                        className="bg-[#0A0A0C] border border-[#232329] p-3.5 flex items-start justify-between gap-3"
+                      >
+                        <div className="text-xs text-white leading-relaxed">
+                          <span className="font-mono text-[#10B981] font-bold mr-2">
+                            HOOK #{idx + 1}:
+                          </span>
+                          &ldquo;{hook}&rdquo;
+                        </div>
+                        <button
+                          onClick={() => onCopy(hook, cid)}
+                          className="px-2.5 py-1 bg-[#141418] hover:bg-[#1F1F26] border border-[#232329] text-[11px] font-mono text-[#A1A1AA] hover:text-white shrink-0 flex items-center gap-1"
+                        >
+                          {copiedId === cid ? (
+                            <>
+                              <Check className="w-3 h-3 text-[#10B981]" /> Copied
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3 h-3" /> Copy
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Primary Direct-Response Ad Copy */}
+              <div className="bg-[#141418] border border-[#232329] p-5">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-xs font-mono uppercase font-bold text-white">
+                    Primary Meta / TikTok Ad Copy
+                  </h3>
+                  <button
+                    onClick={() => onCopy(product.primaryAdCopy, 'ad_body')}
+                    className="px-2.5 py-1 bg-[#0A0A0C] border border-[#232329] text-[11px] font-mono text-[#A1A1AA] hover:text-white flex items-center gap-1"
+                  >
+                    {copiedId === 'ad_body' ? (
+                      <>
+                        <Check className="w-3 h-3 text-[#10B981]" /> Copied
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3 h-3" /> Copy Ad Text
+                      </>
+                    )}
+                  </button>
+                </div>
+                <p className="text-xs text-[#E4E4E7] bg-[#0A0A0C] border border-[#232329] p-3.5 leading-relaxed whitespace-pre-line">
+                  {product.primaryAdCopy}
+                </p>
+              </div>
+
+              {/* Creative Visual Blueprint & Audience Interests */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="bg-[#141418] border border-[#232329] p-4">
+                  <h4 className="text-xs font-mono uppercase font-bold text-[#10B981] mb-2">
+                    UGC Creative Storyboard Blueprint
+                  </h4>
+                  <p className="text-xs text-[#E4E4E7] leading-relaxed">
+                    {product.creativeBlueprint}
+                  </p>
+                </div>
+
+                <div className="bg-[#141418] border border-[#232329] p-4">
+                  <h4 className="text-xs font-mono uppercase font-bold text-[#F59E0B] mb-2">
+                    Recommended Ad Targeting Interest Stack
+                  </h4>
+                  <div className="flex flex-wrap gap-1.5">
+                    {(product.targetInterests || []).map((interest, idx) => (
+                      <span
+                        key={idx}
+                        className="px-2.5 py-1 bg-[#0A0A0C] border border-[#232329] text-xs font-mono text-white"
+                      >
+                        {interest}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="mt-3 pt-3 border-t border-[#232329] text-[11px] text-[#A1A1AA]">
+                    <strong className="text-white">Demographics:</strong> {product.targetDemographics}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ================================================================
+              TAB 3: 3-AI DEBATE VIEW (SIDE-BY-SIDE RAW INSIGHTS)
+             ================================================================ */}
+          {activeTab === 'debate' && (
+            <div className="space-y-5">
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                {/* Column 1: Gemini Market Analyst */}
+                <div className="bg-[#141418] border border-[#232329] p-4 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between pb-2.5 mb-3 border-b border-[#232329]">
+                      <span className="text-xs font-mono font-bold uppercase text-[#3B82F6] flex items-center gap-1.5">
+                        <TrendingUp className="w-4 h-4" />
+                        1. Market Analyst
+                      </span>
+                      <span className="text-[10px] font-mono text-[#71717A]">
+                        {product.marketProvider}
+                      </span>
+                    </div>
+
+                    <div className="space-y-3 text-xs">
+                      <div>
+                        <div className="text-[10px] font-mono uppercase text-[#71717A]">
+                          Core Market Thesis
+                        </div>
+                        <p className="text-[#E4E4E7] mt-1 leading-relaxed">
+                          {product.geminiInsight}
+                        </p>
+                      </div>
+
+                      <div>
+                        <div className="text-[10px] font-mono uppercase text-[#71717A]">
+                          Search Intent Signal
+                        </div>
+                        <p className="text-[#E4E4E7] mt-1 leading-relaxed">
+                          {product.searchIntent}
+                        </p>
+                      </div>
+
+                      <div>
+                        <div className="text-[10px] font-mono uppercase text-[#71717A]">
+                          Velocity Trajectory
+                        </div>
+                        <p className="text-[#10B981] font-mono mt-1">{product.trendTrajectory}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 pt-3 border-t border-[#232329] flex justify-between font-mono text-[11px]">
+                    <span className="text-[#A1A1AA]">Demand: {product.demandScore}/100</span>
+                    <span className="text-[#F59E0B]">Saturation: {product.saturationScore}/100</span>
+                  </div>
+                </div>
+
+                {/* Column 2: Groq Quant & Growth Scorer */}
+                <div className="bg-[#141418] border border-[#232329] p-4 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between pb-2.5 mb-3 border-b border-[#232329]">
+                      <span className="text-xs font-mono font-bold uppercase text-[#10B981] flex items-center gap-1.5">
+                        <Activity className="w-4 h-4" />
+                        2. Quant & Viral Scorer
+                      </span>
+                      <span className="text-[10px] font-mono text-[#71717A]">
+                        {product.quantProvider}
+                      </span>
+                    </div>
+
+                    <div className="space-y-3 text-xs">
+                      <div>
+                        <div className="text-[10px] font-mono uppercase text-[#71717A]">
+                          Quantitative Margin Thesis
+                        </div>
+                        <p className="text-[#E4E4E7] mt-1 leading-relaxed">{product.groqInsight}</p>
+                      </div>
+
+                      <div>
+                        <div className="text-[10px] font-mono uppercase text-[#71717A]">
+                          Unit Economics Spread
+                        </div>
+                        <p className="text-white font-mono mt-1">
+                          COGS ${Number(product.sourcingCost).toFixed(2)} → Retail $
+                          {Number(product.sellingPrice).toFixed(2)} ({product.netProfitMargin}% Net)
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 pt-3 border-t border-[#232329] flex justify-between font-mono text-[11px]">
+                    <span className="text-[#10B981]">Score: {product.winningScore}/100</span>
+                    <span className="text-[#3B82F6]">Viral Wow: {product.viralFactor}/10</span>
+                  </div>
+                </div>
+
+                {/* Column 3: OpenRouter Ruthless Skeptic */}
+                <div className="bg-[#141418] border border-[#232329] p-4 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between pb-2.5 mb-3 border-b border-[#232329]">
+                      <span className="text-xs font-mono font-bold uppercase text-[#F59E0B] flex items-center gap-1.5">
+                        <ShieldAlert className="w-4 h-4" />
+                        3. Ruthless Skeptic
+                      </span>
+                      <span className="text-[10px] font-mono text-[#71717A]">
+                        {product.skepticProvider}
+                      </span>
+                    </div>
+
+                    <div className="space-y-3 text-xs">
+                      <div>
+                        <div className="text-[10px] font-mono uppercase text-[#71717A]">
+                          Devil&apos;s Advocate Audit
+                        </div>
+                        <p className="text-[#E4E4E7] mt-1 leading-relaxed">
+                          {product.openRouterInsight}
+                        </p>
+                      </div>
+
+                      <div>
+                        <div className="text-[10px] font-mono uppercase text-[#71717A]">
+                          Saturation & Competition Risk
+                        </div>
+                        <p className="text-[#F59E0B] mt-1 leading-relaxed">
+                          {product.saturationRisk}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 pt-3 border-t border-[#232329] flex items-center justify-between font-mono text-[11px]">
+                    <span className="text-[#A1A1AA]">Final Verdict:</span>
+                    <span className={`font-bold ${vStyle.text}`}>{product.verdict}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

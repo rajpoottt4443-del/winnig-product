@@ -1,0 +1,6 @@
+{
+  "name": "Triple-AI Winning Product Hunter",
+  "description": "Multi-LLM E-Commerce intelligence and winning product hunter powered by Google Gemini, Groq LPU, and OpenRouter with live web trend signals, unit economics calculator, and viral ad packs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
